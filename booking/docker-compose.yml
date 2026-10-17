@@ -1,0 +1,31 @@
+# Lokalny podgląd bez kluczy Google i SMS: docker compose up → http://localhost:8080/demo
+# (kody SMS pojawiają się w logach kontenera "app").
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: booking
+      POSTGRES_DB: booking
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking"]
+      interval: 2s
+      retries: 20
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://booking:booking@db:5432/booking
+      GCAL_PROVIDER: mock
+      SMS_PROVIDER: console
+      ALLOWED_ORIGINS: "*"
+      ENABLE_DEMO: "true"
+volumes:
+  pgdata:

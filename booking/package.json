@@ -1,0 +1,32 @@
+{
+  "name": "pilanka-booking",
+  "version": "1.0.0",
+  "private": true,
+  "description": "System rezerwacji Pilanka Pilates Tczew: Google Calendar (Free/Busy) + weryfikacja SMS OTP + widget do osadzenia na stronie",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/db/migrate.js",
+    "gcal:check": "node scripts/gcal-check.js",
+    "sms:check": "node scripts/sms-check.js",
+    "test": "node --test --test-concurrency=1 \"test/unit/*.test.js\" \"test/integration/*.test.js\"",
+    "test:unit": "node --test \"test/unit/*.test.js\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/*.test.js\"",
+    "test:e2e": "node --test \"test/e2e/*.test.js\""
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "luxon": "^3.7.0",
+    "pg": "^8.16.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.1"
+  }
+}
