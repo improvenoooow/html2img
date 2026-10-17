@@ -8,7 +8,7 @@
  * Opcje (atrybuty data-* na elemencie):
  *   data-title, data-subtitle      – nagłówek widgetu
  *   data-theme="light|dark|auto"   – motyw kolorystyczny (domyślnie light)
- *   data-contact-phone             – telefon studia pokazywany przy błędach
+ *   data-contact-phone             – telefon studia (pod formularzem i przy błędach)
  *   data-api                       – adres API (domyślnie serwer, z którego wczytano skrypt)
  *
  * Zdarzenia (do analityki, np. GA4 / Meta Pixel) emitowane na elemencie:
@@ -54,7 +54,7 @@
     else if (d.length === 11 && d.indexOf('48') === 0) d = d.slice(2);
     if (d.length !== 9) return { ok: false, error: 'Numer telefonu musi mieć 9 cyfr.' };
     if (PL_MOBILE.indexOf(d.slice(0, 2)) === -1) {
-      return { ok: false, error: 'Podaj numer telefonu komórkowego – na ten numer wyślemy kod SMS.' };
+      return { ok: false, error: 'Podaj numer komórkowy. Na niego wyślemy kod SMS.' };
     }
     return { ok: true, digits: d };
   }
@@ -141,8 +141,8 @@
   };
 
   Widget.prototype._renderShell = function () {
-    var title = this.opts.title || 'Zarezerwuj zajęcia';
-    var subtitle = this.opts.subtitle || 'Wybierz dogodny termin, podaj dane i potwierdź rezerwację kodem SMS.';
+    var title = this.opts.title || 'Zarezerwuj trening';
+    var subtitle = this.opts.subtitle || 'Trzy kroki, bez zakładania konta. Termin potwierdzasz kodem SMS.';
     this.root.innerHTML =
       '<link rel="stylesheet" href="' + esc(this.api) + '/widget.css">' +
       '<div class="plb" data-loading-css>' +
@@ -150,7 +150,7 @@
       '<header class="plb-head"><h2 class="plb-title">' + esc(title) + '</h2>' +
       '<p class="plb-subtitle">' + esc(subtitle) + '</p></header>' +
       '<section class="plb-card" data-ref="whenCard" aria-labelledby="plb-s1">' +
-      '<h3 class="plb-step" id="plb-s1" data-ref="step1"><span class="plb-step-no">1</span>Wybierz termin</h3>' +
+      '<h3 class="plb-step" id="plb-s1" data-ref="step1"><span class="plb-step-no">1</span>Wybierz dzień i godzinę</h3>' +
       '<div class="plb-alert" role="alert" data-ref="whenAlert"></div>' +
       '<div class="plb-when-body" data-ref="whenBody">' +
       '<div class="plb-cal" data-ref="cal" aria-busy="true">' +
@@ -173,12 +173,12 @@
       this._field('lastName', 'Nazwisko', '<input class="plb-input" id="plb-lastName" name="lastName" autocomplete="family-name" maxlength="60" required>') +
       this._field(
         'phone',
-        'Numer telefonu komórkowego',
+        'Telefon komórkowy',
         '<div class="plb-input-wrap"><span class="plb-prefix" aria-hidden="true">+48</span>' +
           '<input class="plb-input" id="plb-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="600 000 000" maxlength="16" required aria-describedby="plb-phone-hint plb-phone-err"></div>' +
           '<span class="plb-sr" id="plb-phone-hint">Polski numer komórkowy, 9 cyfr. Wyślemy na niego kod SMS.</span>',
       ) +
-      this._field('email', 'E-mail <small>(opcjonalnie)</small>', '<input class="plb-input" id="plb-email" name="email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="np. anna@example.com">') +
+      this._field('email', 'E-mail <small>(opcjonalnie)</small>', '<input class="plb-input" id="plb-email" name="email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="np. jan.kowalski@gmail.com">') +
       '<div class="plb-field plb-field-wide">' +
       '<label class="plb-check"><input type="checkbox" name="consent" id="plb-consent" aria-describedby="plb-consent-err">' +
       '<span data-ref="consentText"></span></label>' +
@@ -187,10 +187,14 @@
       '<div class="plb-field-wide plb-captcha"><slot name="captcha"></slot></div>' +
       '</div></section>' +
       '<section class="plb-card" aria-labelledby="plb-s3">' +
-      '<h3 class="plb-step" id="plb-s3"><span class="plb-step-no">3</span>Potwierdzenie SMS</h3>' +
+      '<h3 class="plb-step" id="plb-s3"><span class="plb-step-no">3</span>Potwierdź numer telefonu</h3>' +
       '<div class="plb-alert" role="alert" data-ref="verifyAlert"></div>' +
       '<div data-ref="verify"></div>' +
       '</section></form>' +
+      (this.opts.contactPhone
+        ? '<p class="plb-contact">Wolisz zarezerwować telefonicznie? Zadzwoń: <a href="tel:' +
+          esc(this.opts.contactPhone.replace(/[^\d+]/g, '')) + '">' + esc(this.opts.contactPhone) + '</a></p>'
+        : '') +
       '</div></div>';
 
     var plb = this.root.querySelector('.plb');
@@ -489,7 +493,7 @@
     if (!this.cfg) return;
     var r = this.view ? this._monthRange() : null;
     if (r && r.from > r.to) {
-      el.innerHTML = '<p class="plb-empty">W tym miesiącu nie ma już terminów do rezerwacji.</p>';
+      el.innerHTML = '<p class="plb-empty">Ten miesiąc jest już niedostępny do rezerwacji.</p>';
       return;
     }
     if (this.loadingMonth && !(this.date && this.days[this.date])) {
@@ -505,25 +509,39 @@
       }
       el.innerHTML =
         '<p class="plb-empty">' +
-        (anyFree || this.loadingMonth ? 'Wybierz dzień w kalendarzu, aby zobaczyć wolne godziny.' : 'Brak wolnych terminów w tym miesiącu – sprawdź kolejny.') +
+        (anyFree || this.loadingMonth ? 'Kliknij dzień w kalendarzu, a tutaj pokażą się wolne godziny.' : 'W tym miesiącu wszystko jest już zajęte. Sprawdź następny.') +
         '</p>';
       return;
     }
     var slots = this.days[this.date] || [];
     var self = this;
+    // Grupy wg pory dnia – osoby pracujące szukają zwykle terminu "przed pracą" albo "po pracy".
+    var groups = [
+      { label: 'Rano', from: 0, to: 12 },
+      { label: 'W ciągu dnia', from: 12, to: 16 },
+      { label: 'Po pracy', from: 16, to: 24 },
+    ];
+    var chip = function (s) {
+      var on = self.slot && self.slot.start === s.start;
+      return '<button type="button" class="plb-slot" data-slot="' + esc(s.start) + '" aria-pressed="' + !!on + '">' + esc(s.time) + '</button>';
+    };
+    var grouped = groups
+      .map(function (g) {
+        var items = slots.filter(function (s) {
+          var h = parseInt(s.time, 10);
+          return h >= g.from && h < g.to;
+        });
+        if (!items.length) return '';
+        return (
+          '<div class="plb-slot-group"><p class="plb-slot-group-label" id="plb-g' + g.from + '">' + g.label + '</p>' +
+          '<div class="plb-slots" role="group" aria-labelledby="plb-g' + g.from + '">' + items.map(chip).join('') + '</div></div>'
+        );
+      })
+      .join('');
     el.innerHTML =
       '<p class="plb-times-title">' + esc(longDate(this.date)) +
-      '<span>' + (slots.length ? 'Wybierz godzinę rozpoczęcia (' + this.cfg.slotDurationMin + ' min)' : '') + '</span></p>' +
-      (slots.length
-        ? '<div class="plb-slots" role="group" aria-label="Dostępne godziny">' +
-          slots
-            .map(function (s) {
-              var on = self.slot && self.slot.start === s.start;
-              return '<button type="button" class="plb-slot" data-slot="' + esc(s.start) + '" aria-pressed="' + !!on + '">' + esc(s.time) + '</button>';
-            })
-            .join('') +
-          '</div>'
-        : '<p class="plb-empty">Brak wolnych terminów tego dnia.</p>');
+      '<span>' + (slots.length ? 'Trening trwa ' + this.cfg.slotDurationMin + ' min. Wybierz godzinę startu.' : '') + '</span></p>' +
+      (slots.length ? grouped : '<p class="plb-empty">Ten dzień jest już pełny. Wybierz inny.</p>');
   };
 
   Widget.prototype.selectDate = function (date) {
@@ -691,7 +709,7 @@
     return new Promise(function (resolve, reject) {
       self.captchaWaiters.push(resolve);
       setTimeout(function () {
-        reject({ code: 'CAPTCHA_PENDING', message: 'Trwa weryfikacja antyspamowa – spróbuj ponownie za chwilę.' });
+        reject({ code: 'CAPTCHA_PENDING', message: 'Trwa weryfikacja antyspamowa. Spróbuj ponownie za chwilę.' });
       }, 20000);
     });
   };
@@ -707,8 +725,8 @@
     var el = this.$('verify');
     if (this.phase === 'select') {
       el.innerHTML =
-        '<p class="plb-note">Na podany numer wyślemy jednorazowy kod. Do czasu jego wpisania termin będzie zarezerwowany dla Ciebie przez ' +
-        (this.cfg ? this.cfg.holdMinutes : 10) + ' minut.</p>' +
+        '<p class="plb-note">Wyślemy kod SMS na podany numer. Przez ' + (this.cfg ? this.cfg.holdMinutes : 10) +
+        ' minut nikt inny nie zajmie tego terminu.</p>' +
         '<button type="submit" class="plb-btn" data-ref="sendBtn">Wyślij kod SMS</button>';
       return;
     }
@@ -969,7 +987,7 @@
       '<section class="plb-card plb-success" tabindex="-1" data-ref="success" aria-live="polite">' +
       '<div class="plb-success-icon">' + ICON.check + '</div>' +
       '<h3>Zarezerwowano!</h3>' +
-      '<p>Dziękujemy' + (booking.firstName ? ', ' + esc(booking.firstName) : '') + '. Twoja rezerwacja została potwierdzona – do zobaczenia na zajęciach!</p>' +
+      '<p>Dziękujemy' + (booking.firstName ? ', ' + esc(booking.firstName) : '') + '. Termin jest zapisany w kalendarzu studia. Do zobaczenia na treningu.</p>' +
       '<dl class="plb-success-details">' +
       '<div><dt>Termin</dt><dd>' + esc(dateFmt.format(start)) + '</dd></div>' +
       '<div><dt>Godzina</dt><dd>' + esc(timeFmt.format(start)) + '–' + esc(timeFmt.format(end)) + '</dd></div>' +
@@ -1003,12 +1021,12 @@
       'DTSTAMP:' + stamp(new Date().toISOString()),
       'DTSTART:' + stamp(b.start),
       'DTEND:' + stamp(b.end),
-      'SUMMARY:Zajęcia – ' + name,
+      'SUMMARY:Trening – ' + name,
       'DESCRIPTION:Rezerwacja potwierdzona online.',
       'BEGIN:VALARM',
       'TRIGGER:-PT2H',
       'ACTION:DISPLAY',
-      'DESCRIPTION:Zajęcia – ' + name,
+      'DESCRIPTION:Trening – ' + name,
       'END:VALARM',
       'END:VEVENT',
       'END:VCALENDAR',

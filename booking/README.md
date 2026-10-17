@@ -14,15 +14,16 @@ System działa jako osobna usługa (Node.js + PostgreSQL, np. na Railway). Na st
 
 1. [Jak to działa](#jak-to-działa)
 2. [Bezpieczeństwo](#bezpieczeństwo)
-3. [Uruchomienie lokalne (bez kluczy)](#uruchomienie-lokalne-bez-kluczy)
-4. [Konfiguracja Google Calendar](#konfiguracja-google-calendar-service-account)
-5. [Konfiguracja bramki SMS](#konfiguracja-bramki-sms)
-6. [Wdrożenie na Railway](#wdrożenie-na-railway)
-7. [Osadzenie na stronie](#osadzenie-na-stronie)
-8. [Codzienna obsługa przez studio](#codzienna-obsługa-przez-studio)
-9. [API](#api)
-10. [Testy](#testy)
-11. [RODO](#rodo)
+3. [Grupa docelowa: mężczyźni 35+](#grupa-docelowa-mężczyźni-35)
+4. [Uruchomienie lokalne (bez kluczy)](#uruchomienie-lokalne-bez-kluczy)
+5. [Konfiguracja Google Calendar](#konfiguracja-google-calendar-service-account)
+6. [Konfiguracja bramki SMS](#konfiguracja-bramki-sms)
+7. [Wdrożenie na Railway](#wdrożenie-na-railway)
+8. [Osadzenie na stronie](#osadzenie-na-stronie)
+9. [Codzienna obsługa przez studio](#codzienna-obsługa-przez-studio)
+10. [API](#api)
+11. [Testy](#testy)
+12. [RODO](#rodo)
 
 ---
 
@@ -179,17 +180,21 @@ Opcje (atrybuty `data-*`):
 | `data-privacy-url` | Link do polityki prywatności w zgodzie RODO (lub zmienna `PRIVACY_POLICY_URL`) |
 | `data-theme` | `light` (domyślnie), `dark`, `auto` |
 
-**Kolory i czcionka.** Widget domyślnie dziedziczy czcionkę strony. Kolory zmienisz w CSS motywu:
+**Kolory i czcionka.** Domyślny motyw to grafit z ciemnym petrolem (patrz [Grupa docelowa](#grupa-docelowa-mężczyźni-35)).
+Widget dziedziczy czcionkę strony. Kolory zmienisz w CSS motywu:
 
 ```css
 [data-pilanka-booking] {
-  --plb-accent: #8a6f5a;        /* kolor przycisków i zaznaczeń */
-  --plb-accent-hover: #765d4a;
-  --plb-accent-soft: #f3ece6;   /* tło dni z wolnymi terminami */
-  --plb-radius: 8px;
-  --plb-font: "Poppins", sans-serif;
+  --plb-accent: #1f4f5b;        /* kolor przycisków i zaznaczeń */
+  --plb-accent-hover: #163e48;
+  --plb-accent-soft: #e2edf0;   /* tło dni z wolnymi terminami */
+  --plb-radius: 12px;
+  --plb-btn-radius: 10px;
+  --plb-font: "Inter", sans-serif;
 }
 ```
+
+Zmieniając kolory, zachowaj kontrast tekstu co najmniej 4.5:1 (najlepiej 7:1), np. sprawdzając go na webaim.org/resources/contrastchecker.
 
 **Analityka (GA4 / Meta Pixel).** Widget emituje zdarzenia `pilanka:otp-sent` i `pilanka:booked`:
 
@@ -204,6 +209,27 @@ Opcje (atrybuty `data-*`):
 
 **Content-Security-Policy.** Jeśli strona ma CSP, dodaj domenę serwera rezerwacji do `script-src`, `style-src`
 i `connect-src`. Przy włączonym Turnstile dodaj też `https://challenges.cloudflare.com` do `script-src` i `frame-src`.
+
+## Grupa docelowa: mężczyźni 35+
+
+Widget jest domyślnie ustawiony pod główną grupę odbiorców studia.
+
+- **Język:** „trening” zamiast „zajęć”, krótkie i konkretne komunikaty, podtytuł usuwający tarcie
+  („Trzy kroki, bez zakładania konta”). Wszystkie formy są **neutralne płciowo**, bez „zarezerwowałeś/aś”,
+  więc kobiety też rezerwują bez zgrzytu.
+- **Godziny pogrupowane** na *Rano / W ciągu dnia / Po pracy*. Osoba pracująca od razu widzi terminy przed pracą
+  i po niej.
+- **Czytelność:** bazowa czcionka 17 px, kontrast wszystkich tekstów co najmniej 7:1 (WCAG AAA), przyciski i godziny
+  o wysokości min. 48 px. Wzrok po 40. roku życia gorzej radzi sobie z małym, szarym tekstem.
+- **Telefon jako alternatywa:** z atrybutem `data-contact-phone` pod formularzem pojawia się
+  „Wolisz zarezerwować telefonicznie? Zadzwoń: …” (klikalny link `tel:`).
+- **Stylistyka:** grafit i ciemny petrol, mniejsze zaokrąglenia, rzeczowy wygląd zamiast pastelowego „spa”.
+
+Rekomendowany grafik pod osoby pracujące (do decyzji studia):
+
+```
+WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
+```
 
 ## Codzienna obsługa przez studio
 

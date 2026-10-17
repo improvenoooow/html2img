@@ -61,7 +61,7 @@ test('widget: wybór terminu → dane → SMS → kod → "Zarezerwowano"', { sk
     await w.locator('#plb-lastName').fill('Kowalska');
     await w.locator('#plb-phone').fill('58 123 45 67');
     await w.getByRole('button', { name: 'Wyślij kod SMS' }).click();
-    await w.locator('#plb-phone-err').filter({ hasText: 'komórkowego' }).waitFor();
+    await w.locator('#plb-phone-err').filter({ hasText: 'komórkowy' }).waitFor();
     await w.locator('#plb-consent-err').filter({ hasText: 'Zgoda' }).waitFor();
     assert.equal(ctx.sms.sent.length, 0);
     await shot(page, '02-walidacja');

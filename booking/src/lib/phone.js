@@ -32,7 +32,7 @@ function normalizePlPhone(input) {
 
   if (digits.length !== 9) return { ok: false, error: 'Numer telefonu musi mieć 9 cyfr.' };
   if (!PL_MOBILE_PREFIXES.includes(digits.slice(0, 2))) {
-    return { ok: false, error: 'Podaj numer telefonu komórkowego – na ten numer wyślemy kod SMS.' };
+    return { ok: false, error: 'Podaj numer komórkowy. Na niego wyślemy kod SMS.' };
   }
   return { ok: true, e164: `+48${digits}`, national: digits };
 }

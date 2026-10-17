@@ -20,7 +20,7 @@ test('akceptuje wszystkie prefiksy mobilne', () => {
 
 test('odrzuca numery stacjonarne, zagraniczne i błędne', () => {
   const cases = {
-    '58 123 45 67': /komórkowego/, // stacjonarny Gdańsk
+    '58 123 45 67': /komórkowy/, // stacjonarny Gdańsk
     '+49 1512 3456789': /polskie/,
     '+1 202 555 0100': /polskie/,
     '60012345': /9 cyfr/,
