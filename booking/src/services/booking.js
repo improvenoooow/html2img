@@ -168,8 +168,11 @@ class BookingService {
 
       // Własna blokada klienta (zna jej token).
       let own = holdToken ? await repo.findPendingByToken(db, hashHoldToken(holdToken), now, { forUpdate: true }) : null;
+      let replacedOwnId = null;
       if (own && own.phone_hash !== hashes.phoneHash) {
-        await repo.cancelBooking(db, own.id, now); // klient zmienił numer telefonu
+        // Klient zmienił numer – poprzednią blokadę zwolnimy dopiero po udanej wysyłce SMS-a na nowy numer,
+        // ale w liczeniu zajętości już jej nie uwzględniamy.
+        replacedOwnId = own.id;
         own = null;
       }
       if (own && !isSameSlot(own)) await assertCapacity(own.id);
@@ -185,8 +188,16 @@ class BookingService {
 
       let target = own;
       if (!target) {
-        const pendings = await repo.findPendingByPhone(db, hashes.phoneHash, now);
+        let pendings = await repo.findPendingByPhone(db, hashes.phoneHash, now);
         target = pendings.find(isSameSlot) || null;
+        // Bez tokenu dane istniejącej rezerwacji są nienaruszalne. Te same dane → zwykła ponowna wysyłka kodu;
+        // inne dane (np. poprawka literówki po zamknięciu karty) → stara blokada zastąpiona nową, z nowymi danymi.
+        // Kod jest związany z ID rezerwacji, więc potwierdzone dane to zawsze te, z którymi wysłano ten kod.
+        if (target && !this._sameIdentity(target, input)) {
+          await repo.cancelBooking(db, target.id, now);
+          pendings = pendings.filter((p) => p !== target);
+          target = null;
+        }
         if (!target && pendings.length >= MAX_PENDING_HOLDS_PER_PHONE) {
           const firstFree = Math.min(...pendings.map((p) => p.lock_expires_at.getTime()));
           throw Errors.tooManyHolds((firstFree - nowMs) / 1000);
@@ -209,7 +220,7 @@ class BookingService {
         });
         if (version === null) throw Errors.holdExpired();
       } else {
-        await assertCapacity(null);
+        await assertCapacity(replacedOwnId);
         bookingId = crypto.randomUUID();
         newToken = generateHoldToken();
         otpHash = hashOtp(this.config.otp.secret, bookingId, code);
@@ -226,10 +237,15 @@ class BookingService {
         });
       }
       const smsLogId = await repo.insertSmsLog(db, { ...hashes, bookingId, now });
-      return { bookingId, smsSent: true, snapshot: target, version, otpHash, smsLogId, lockExpiresAt, otpExpiresAt, newToken };
+      return {
+        bookingId, smsSent: true, snapshot: target, version, otpHash, smsLogId, lockExpiresAt, otpExpiresAt, newToken, replacedOwnId,
+      };
     });
 
-    if (hold.smsSent) await this._sendOtpSms(input.phone, code, hold);
+    if (hold.smsSent) {
+      await this._sendOtpSms(input.phone, code, hold);
+      if (hold.replacedOwnId) await repo.cancelBooking(this.pool, hold.replacedOwnId, this.clock.now());
+    }
 
     return {
       bookingId: hold.bookingId,
@@ -293,6 +309,15 @@ class BookingService {
       }).catch((e) => this.logger.error('sms_failure_cleanup_failed', { err: e }));
       throw Errors.smsFailed();
     }
+  }
+
+  _sameIdentity(b, input) {
+    const norm = (v) => (v || '').toLocaleLowerCase('pl');
+    return (
+      norm(b.first_name) === norm(input.firstName) &&
+      norm(b.last_name) === norm(input.lastName) &&
+      norm(b.email) === norm(input.email)
+    );
   }
 
   /** ID własnej blokady klienta (z tokenu) – do pominięcia jej przy wyświetlaniu zajętości. */

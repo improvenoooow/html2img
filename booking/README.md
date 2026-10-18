@@ -319,7 +319,13 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 SHA-256. Jest jedynym dowodem, że kolejne żądanie pochodzi od tego samego klienta. Z tokenem można zmienić termin
 lub dane bez nowego SMS-a (`smsSent: false`, jeśli kod jest nadal ważny), wymusić nowy kod (`resend: true`) i
 zwolnić blokadę. Samo ID rezerwacji nie daje żadnej kontroli, bo nie jest tajne: trafia do analityki i do opisu
-wydarzenia. Jeden numer może mieć najwyżej 2 niepotwierdzone blokady naraz.
+wydarzenia. Jeden numer może mieć najwyżej 2 niepotwierdzone blokady naraz. Potwierdzenie jednej z nich zwalnia
+pozostałe blokady tego numeru, więc dwie osoby rezerwujące równocześnie z jednego numeru muszą zrobić to po kolei.
+
+Bez tokenu dane istniejącej rezerwacji nigdy się nie zmieniają. Ponowne wysłanie formularza z tym samym numerem,
+terminem i danymi wyśle nowy kod do tej samej rezerwacji. Inne dane (np. poprawka literówki po zamknięciu karty)
+zastąpią blokadę nową rezerwacją. Kod SMS jest związany z ID rezerwacji, więc potwierdzone dane to zawsze te,
+z którymi wysłano wpisany kod.
 | GET | `/health` | Stan usługi i bazy |
 
 Błędy mają format `{ "error": { "code": "SLOT_UNAVAILABLE", "message": "…po polsku…" } }`.

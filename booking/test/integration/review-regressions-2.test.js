@@ -108,10 +108,11 @@ test('N4: ID rezerwacji nie daje kontroli nad blokadą – potrzebny token, któ
     const row = (await ctx.pool.query('SELECT first_name FROM bookings WHERE id = $1', [a.data.bookingId])).rows[0];
     assert.equal(row.first_name, 'Anna');
 
-    // Ponowna wysyłka bez tokenu (np. ktoś znający numer) nie dostaje tokenu cudzej blokady.
+    // Ponowna wysyłka bez tokenu z tymi samymi danymi nie wydaje tokenu do istniejącej blokady.
     ctx.clock.advanceMinutes(2);
-    const again = await ctx.api('/api/send-otp', { body: person({ firstName: 'Mallory' }), ip: '10.6.6.7' });
+    const again = await ctx.api('/api/send-otp', { body: person(), ip: '10.6.6.7' });
     assert.equal(again.status, 200);
+    assert.equal(again.data.bookingId, a.data.bookingId);
     assert.equal(again.data.holdToken, undefined);
 
     // Właściciel z tokenem zwalnia blokadę.

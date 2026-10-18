@@ -93,33 +93,77 @@ test('niejednoznaczna awaria wysyłki (timeout) liczy się do limitów – SMS m
   }
 });
 
-test('osoba znająca cudzy numer nie może zwolnić ani przejąć cudzej blokady', async () => {
+test('osoba znająca cudzy numer nie może sprawić, że ofiara potwierdzi rezerwację na cudze dane', async () => {
   const ctx = await createTestContext();
   try {
     const v = await ctx.api('/api/send-otp', { body: victim, ip: '10.0.0.1' });
-    const victimCode = ctx.sms.lastCode();
 
     // Inny termin z tym samym numerem – blokada ofiary zostaje.
-    const other = await ctx.api('/api/send-otp', { body: { ...victim, slotStart: SLOT_B, firstName: 'Mallory' }, ip: '10.6.6.6' });
-    assert.ok([200, 429].includes(other.status));
+    await ctx.api('/api/send-otp', { body: { ...victim, slotStart: SLOT_B, firstName: 'Mallory' }, ip: '10.6.6.6' });
     assert.ok(!(await slotsOn(ctx)).includes(SLOT_A), 'termin ofiary nadal zablokowany');
 
-    // Ten sam termin po cooldownie – dane ofiary nie są nadpisywane.
+    // Ten sam termin, inne dane, bez tokenu → blokada zastąpiona NOWĄ rezerwacją (nowe ID). Kod jest związany
+    // z ID rezerwacji, więc widget ofiary (który zna tylko swoje ID) nie potwierdzi rezerwacji na dane Mallory.
     ctx.clock.advanceMinutes(2);
     const hijack = await ctx.api('/api/send-otp', {
-      body: { ...victim, firstName: 'Mallory', lastName: 'Evil', email: 'evil@example.com' },
+      body: { ...victim, firstName: 'Mallory', lastName: 'Evil' },
       ip: '10.6.6.7',
     });
     assert.equal(hijack.status, 200);
-    const row = (await ctx.pool.query('SELECT * FROM bookings WHERE id = $1', [v.data.bookingId])).rows[0];
-    assert.equal(row.first_name, 'Anna');
-    assert.equal(row.email, null);
+    assert.notEqual(hijack.data.bookingId, v.data.bookingId);
+    const r = await ctx.api('/api/verify-otp', { body: { bookingId: v.data.bookingId, code: ctx.sms.lastCode() } });
+    assert.equal(r.data.error.code, 'HOLD_EXPIRED', 'ofiara widzi prośbę o ponowienie, a nie cudze dane');
 
-    const ok = await ctx.api('/api/verify-otp', { body: { bookingId: v.data.bookingId, code: ctx.sms.lastCode() } });
+    // Ofiara ponawia ze swoimi danymi i potwierdza na swoje nazwisko.
+    ctx.clock.advanceMinutes(2);
+    const again = await ctx.api('/api/send-otp', { body: victim, ip: '10.0.0.1' });
+    const ok = await ctx.api('/api/verify-otp', { body: { bookingId: again.data.bookingId, code: ctx.sms.lastCode() } });
     assert.equal(ok.status, 200);
     const ev = [...ctx.calendar.events.values()].find((e) => e.id.startsWith('plb'));
     assert.equal(ev.summary, 'Rezerwacja: Anna Kowalska - +48 600 123 456');
-    assert.ok(victimCode);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('poprawka danych bez tokenu (np. po zamknięciu karty) tworzy nową blokadę z nowymi danymi', async () => {
+  const ctx = await createTestContext();
+  try {
+    const first = await ctx.api('/api/send-otp', { body: { ...victim, firstName: 'Ana' } });
+    ctx.clock.advanceMinutes(2);
+    const fixed = await ctx.api('/api/send-otp', { body: { ...victim, firstName: 'Anna' } });
+    assert.equal(fixed.status, 200);
+    assert.ok(fixed.data.holdToken, 'nowy token – można dalej zmieniać dane');
+    assert.notEqual(fixed.data.bookingId, first.data.bookingId);
+    const ok = await ctx.api('/api/verify-otp', { body: { bookingId: fixed.data.bookingId, code: ctx.sms.lastCode() } });
+    assert.equal(ok.data.booking.firstName, 'Anna');
+
+    // Te same dane bez tokenu → zwykła ponowna wysyłka dla tej samej rezerwacji.
+    const a = await ctx.api('/api/send-otp', { body: { ...victim, slotStart: SLOT_B, phone: '512000001' }, ip: '10.0.0.3' });
+    ctx.clock.advanceMinutes(2);
+    const b = await ctx.api('/api/send-otp', { body: { ...victim, slotStart: SLOT_B, phone: '512000001' }, ip: '10.0.0.3' });
+    assert.equal(b.data.bookingId, a.data.bookingId);
+    assert.equal(b.data.holdToken, undefined);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test('zmiana numeru z nieudanym SMS-em na nowy numer zachowuje dotychczasową blokadę', async () => {
+  const ctx = await createTestContext();
+  try {
+    const first = await ctx.api('/api/send-otp', { body: victim });
+    const send = ctx.sms.send.bind(ctx.sms);
+    ctx.sms.send = async () => {
+      throw new SmsError('nieprawidłowy numer', { provider: 'capture', code: 13, definitive: true });
+    };
+    const r = await ctx.api('/api/send-otp', { body: { ...victim, phone: '512345678', holdToken: first.data.holdToken } });
+    assert.equal(r.status, 502);
+    ctx.sms.send = send;
+    const row = (await ctx.pool.query('SELECT status FROM bookings WHERE id = $1', [first.data.bookingId])).rows[0];
+    assert.equal(row.status, 'pending');
+    const ok = await ctx.api('/api/verify-otp', { body: { bookingId: first.data.bookingId, code: ctx.sms.lastCode() } });
+    assert.equal(ok.status, 200);
   } finally {
     await ctx.close();
   }
