@@ -43,6 +43,13 @@ const Errors = {
   otpExpired: () => new AppError(410, 'OTP_EXPIRED', 'Kod SMS wygasł. Wyślij nowy kod.'),
   otpInvalid: (attemptsLeft) =>
     new AppError(400, 'OTP_INVALID', 'Nieprawidłowy kod SMS.', { attemptsLeft }),
+  tooManyHolds: (retryAfterSec) =>
+    new AppError(
+      429,
+      'TOO_MANY_HOLDS',
+      'Na ten numer czekają już niepotwierdzone rezerwacje. Wpisz kod z SMS-a albo spróbuj ponownie za kilka minut.',
+      { retryAfter: Math.max(1, Math.ceil(retryAfterSec)) },
+    ),
   otpLocked: () =>
     new AppError(429, 'OTP_LOCKED', 'Wpisano zbyt wiele błędnych kodów. Wyślij nowy kod SMS.'),
   confirmInProgress: () =>

@@ -4,8 +4,6 @@ const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { clientKey } = require('../lib/ip');
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 function limiter({ windowMs, limit, message }) {
   return rateLimit({
     windowMs,
@@ -27,7 +25,7 @@ function limiter({ windowMs, limit, message }) {
  *   GET  /api/slots         – wolne terminy (?from=RRRR-MM-DD&to=RRRR-MM-DD)
  *   POST /api/send-otp      – soft lock terminu + wysyłka kodu SMS
  *   POST /api/verify-otp    – weryfikacja kodu, utworzenie wydarzenia w GCal, potwierdzenie
- *   POST /api/release-hold  – zwolnienie blokady (klient zmienia dane / rezygnuje)
+ *   POST /api/release-hold  – zwolnienie blokady przy zamknięciu strony ({ holdToken })
  */
 function createApiRouter({ config, availability, bookings }) {
   const router = express.Router();
@@ -64,9 +62,10 @@ function createApiRouter({ config, availability, bookings }) {
   });
 
   router.get('/slots', async (req, res) => {
-    const { from, to, exclude } = req.query;
-    // exclude = ID własnej blokady klienta (np. po "Zmień dane"), żeby jego termin nie wyglądał na zajęty.
-    const excludeBookingId = typeof exclude === 'string' && UUID_RE.test(exclude) ? exclude : null;
+    const { from, to } = req.query;
+    // Nagłówek X-Hold-Token: własna blokada klienta (np. po "Zmień dane") nie jest pokazywana jako zajęta.
+    // Nagłówek, a nie parametr URL – adresy trafiają do logów serwera WWW, a token jest dowodem własności blokady.
+    const excludeBookingId = await bookings.holdIdForToken(req.get('X-Hold-Token'));
     res.json(await availability.getAvailability(String(from || ''), String(to || from || ''), { excludeBookingId }));
   });
 

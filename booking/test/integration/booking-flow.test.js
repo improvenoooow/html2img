@@ -248,11 +248,11 @@ test('globalny dzienny limit SMS chroni budżet', async () => {
   assert.equal(r.data.error.code, 'SMS_DAILY_LIMIT');
 });
 
-test('zmiana terminu z dowodem własności (previousBookingId) przenosi blokadę bez nowego SMS-a', async () => {
+test('zmiana terminu z dowodem własności (holdToken) przenosi blokadę bez nowego SMS-a', async () => {
   const first = await ctx.api('/api/send-otp', { body: person() });
   const code = ctx.sms.lastCode();
   const second = await ctx.api('/api/send-otp', {
-    body: person({ slotStart: SLOT_1000, previousBookingId: first.data.bookingId }),
+    body: person({ slotStart: SLOT_1000, holdToken: first.data.holdToken }),
   });
   assert.equal(second.status, 200, JSON.stringify(second.data));
   assert.equal(second.data.smsSent, false);
@@ -270,14 +270,14 @@ test('release-hold zwalnia termin od razu (także jako text/plain z sendBeacon)'
   const res = await fetch(`${ctx.baseUrl}/api/release-hold`, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-    body: JSON.stringify({ bookingId: sent.data.bookingId }),
+    body: JSON.stringify({ holdToken: sent.data.holdToken }),
   });
   assert.deepEqual(await res.json(), { released: true });
   assert.ok((await slotsOn(ctx)).includes(SLOT_0900));
   const code = ctx.sms.lastCode();
   const v = await ctx.api('/api/verify-otp', { body: { bookingId: sent.data.bookingId, code } });
   assert.equal(v.data.error.code, 'HOLD_EXPIRED');
-  assert.deepEqual((await ctx.api('/api/release-hold', { body: { bookingId: 'nie-uuid' } })).data, { released: false });
+  assert.deepEqual((await ctx.api('/api/release-hold', { body: { bookingId: sent.data.bookingId } })).data, { released: false }, 'samo ID nie wystarcza');
 });
 
 test('walidacja danych wejściowych', async () => {

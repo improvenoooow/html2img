@@ -51,6 +51,8 @@ class SmsapiProvider {
         code,
         // 101/102/103: autoryzacja / brak środków – problem konfiguracji studia, nie klienta.
         configProblem: [101, 102, 103, 105, 14].includes(Number(code)) || res.status === 401,
+        // Błąd API (pole "error") lub 4xx = odrzucone. 5xx bez treści błędu – nie wiadomo, czy SMS wyszedł.
+        definitive: (data && data.error !== undefined) || (res.status >= 400 && res.status < 500),
       });
     }
     const item = data.list?.[0];

@@ -6,12 +6,12 @@
  * dzięki czemu logika wygasania blokad jest deterministyczna i testowalna.
  */
 
-// Rezerwacja blokuje termin, gdy jest w trakcie potwierdzania lub oczekuje na kod SMS (ważny soft lock).
-// Potwierdzone liczymy tylko na żądanie: przy zajęciach indywidualnych źródłem prawdy jest Google Calendar
-// (nieprzezroczyste wydarzenie blokuje Free/Busy), więc usunięcie wydarzenia od razu zwalnia termin.
-const ACTIVE = (nowParam, includeConfirmed) =>
-  `(status = 'confirming' ${includeConfirmed ? "OR status = 'confirmed'" : ''} ` +
-  `OR (status = 'pending' AND lock_expires_at > ${nowParam}))`;
+// Rezerwacja blokuje termin, gdy jest potwierdzona, w trakcie potwierdzania lub oczekuje na kod SMS
+// i jej soft lock jeszcze nie wygasł. Baza jest twardą ochroną przed podwójną rezerwacją – nie polegamy
+// na tym, że Free/Busy w Google od razu pokaże świeżo dodane wydarzenie. Wydarzenia usunięte przez studio
+// zwalniają termin przez synchronizację w zadaniu okresowym (co minutę).
+const ACTIVE = (nowParam) =>
+  `(status IN ('confirmed', 'confirming') OR (status = 'pending' AND lock_expires_at > ${nowParam}))`;
 
 const GLOBAL_HOLD_LOCK_KEY = 728_431_002;
 const MAINTENANCE_LOCK_KEY = 728_431_003;
@@ -21,20 +21,20 @@ async function lockHoldSection(db) {
   await db.query('SELECT pg_advisory_xact_lock($1)', [GLOBAL_HOLD_LOCK_KEY]);
 }
 
-async function listActiveInRange(db, from, to, now, { includeConfirmed = true, excludeId = null } = {}) {
+async function listActiveInRange(db, from, to, now, { excludeId = null } = {}) {
   const { rows } = await db.query(
     `SELECT slot_start, slot_end FROM bookings
-     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3', includeConfirmed)}
+     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3')}
        AND ($4::uuid IS NULL OR id <> $4::uuid)`,
     [from, to, now, excludeId],
   );
   return rows;
 }
 
-async function countActiveOverlapping(db, start, end, now, { excludeId = null, includeConfirmed = true } = {}) {
+async function countActiveOverlapping(db, start, end, now, { excludeId = null } = {}) {
   const { rows } = await db.query(
     `SELECT count(*)::int AS n FROM bookings
-     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3', includeConfirmed)}
+     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3')}
        AND ($4::uuid IS NULL OR id <> $4::uuid)`,
     [start, end, now, excludeId],
   );
@@ -54,11 +54,12 @@ async function findPendingByPhone(db, phoneHash, now) {
 async function insertBooking(db, b) {
   await db.query(
     `INSERT INTO bookings (id, slot_start, slot_end, status, first_name, last_name, phone, phone_hash, email,
-                           lock_expires_at, otp_hash, otp_expires_at, otp_attempts, consent_at, created_at, updated_at)
-     VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $12, $12)`,
+                           lock_expires_at, otp_hash, otp_expires_at, otp_attempts, consent_at, created_at, updated_at,
+                           hold_token_hash)
+     VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, 0, $12, $12, $12, $13)`,
     [
       b.id, b.slotStart, b.slotEnd, b.firstName, b.lastName, b.phone, b.phoneHash, b.email,
-      b.lockExpiresAt, b.otpHash, b.otpExpiresAt, b.now,
+      b.lockExpiresAt, b.otpHash, b.otpExpiresAt, b.now, b.holdTokenHash,
     ],
   );
 }
@@ -68,43 +69,84 @@ async function insertBooking(db, b) {
  * Termin i dane klienta zmieniane tylko, gdy zostaną podane (czyli gdy klient udowodnił, że to jego rezerwacja).
  */
 async function refreshPendingBooking(db, id, b) {
-  const { rowCount } = await db.query(
+  const { rows } = await db.query(
     `UPDATE bookings SET otp_hash = $2, otp_expires_at = $3, otp_attempts = 0, lock_expires_at = $4, updated_at = $5,
+            version = version + 1,
             slot_start = COALESCE($6, slot_start), slot_end = COALESCE($7, slot_end),
             first_name = COALESCE($8, first_name), last_name = COALESCE($9, last_name),
             email = CASE WHEN $10::boolean THEN $11 ELSE email END,
             consent_at = CASE WHEN $10::boolean THEN $5 ELSE consent_at END
-     WHERE id = $1 AND status = 'pending'`,
+     WHERE id = $1 AND status = 'pending'
+     RETURNING version`,
     [
       id, b.otpHash, b.otpExpiresAt, b.lockExpiresAt, b.now,
       b.slotStart ?? null, b.slotEnd ?? null, b.firstName ?? null, b.lastName ?? null,
       b.firstName !== undefined, b.email ?? null,
     ],
   );
-  return rowCount > 0;
+  return rows[0] ? rows[0].version : null;
 }
 
 /** Zmiana terminu lub danych oczekującej rezerwacji bez wysyłania nowego kodu (kod z SMS-a nadal ważny). */
 async function updatePendingDetails(db, id, b) {
   const { rowCount } = await db.query(
     `UPDATE bookings SET slot_start = $2, slot_end = $3, first_name = $4, last_name = $5, email = $6,
-            consent_at = $7, updated_at = $7
+            consent_at = $7, updated_at = $7, version = version + 1
      WHERE id = $1 AND status = 'pending'`,
     [id, b.slotStart, b.slotEnd, b.firstName, b.lastName, b.email, b.now],
   );
   return rowCount > 0;
 }
 
-/** Przywraca stan rezerwacji sprzed nieudanej ponownej wysyłki SMS (kod, próby, blokada, termin, dane). */
-async function restorePendingBooking(db, snapshot, now) {
-  await db.query(
+/**
+ * Przywraca stan sprzed nieudanej ponownej wysyłki SMS – tylko jeśli w międzyczasie nikt nie zmienił rezerwacji
+ * (wersja wiersza). Jeśli klient zdążył ją zmienić (np. przeniósł termin), przywracamy wyłącznie kod i blokadę,
+ * i to tylko gdy wciąż obowiązuje kod z nieudanej wysyłki – nigdy nie cofamy terminu na zajęty już slot.
+ */
+async function restorePendingBooking(db, snapshot, { version, failedOtpHash, now }) {
+  const full = await db.query(
     `UPDATE bookings SET otp_hash = $2, otp_expires_at = $3, otp_attempts = $4, lock_expires_at = $5,
-            slot_start = $6, slot_end = $7, first_name = $8, last_name = $9, email = $10, updated_at = $11
-     WHERE id = $1 AND status = 'pending'`,
+            slot_start = $6, slot_end = $7, first_name = $8, last_name = $9, email = $10, updated_at = $11,
+            version = version + 1
+     WHERE id = $1 AND status = 'pending' AND version = $12`,
     [
       snapshot.id, snapshot.otp_hash, snapshot.otp_expires_at, snapshot.otp_attempts, snapshot.lock_expires_at,
-      snapshot.slot_start, snapshot.slot_end, snapshot.first_name, snapshot.last_name, snapshot.email, now,
+      snapshot.slot_start, snapshot.slot_end, snapshot.first_name, snapshot.last_name, snapshot.email, now, version,
     ],
+  );
+  if (full.rowCount > 0) return 'full';
+  const partial = await db.query(
+    `UPDATE bookings SET otp_hash = $2, otp_expires_at = $3, otp_attempts = $4, lock_expires_at = $5, updated_at = $6,
+            version = version + 1
+     WHERE id = $1 AND status = 'pending' AND otp_hash = $7`,
+    [snapshot.id, snapshot.otp_hash, snapshot.otp_expires_at, snapshot.otp_attempts, snapshot.lock_expires_at, now, failedOtpHash],
+  );
+  return partial.rowCount > 0 ? 'otp' : 'none';
+}
+
+async function findPendingByToken(db, tokenHash, now, { forUpdate = false } = {}) {
+  const { rows } = await db.query(
+    `SELECT * FROM bookings WHERE hold_token_hash = $1 AND status = 'pending' AND lock_expires_at > $2
+     ${forUpdate ? 'FOR UPDATE' : ''}`,
+    [tokenHash, now],
+  );
+  return rows[0] || null;
+}
+
+/** Po potwierdzeniu: zwolnij pozostałe blokady tego numeru (np. po odświeżeniu strony i wyborze innego terminu). */
+async function cancelOtherPendingForPhone(db, phoneHash, exceptId, now) {
+  const { rowCount } = await db.query(
+    `UPDATE bookings SET status = 'cancelled', otp_hash = NULL, updated_at = $3
+     WHERE phone_hash = $1 AND id <> $2 AND status = 'pending'`,
+    [phoneHash, exceptId, now],
+  );
+  return rowCount;
+}
+
+async function updateConfirmedSlot(db, id, start, end, now) {
+  await db.query(
+    `UPDATE bookings SET slot_start = $2, slot_end = $3, updated_at = $4 WHERE id = $1 AND status = 'confirmed'`,
+    [id, start, end, now],
   );
 }
 
@@ -246,6 +288,9 @@ module.exports = {
   refreshPendingBooking,
   updatePendingDetails,
   restorePendingBooking,
+  findPendingByToken,
+  cancelOtherPendingForPhone,
+  updateConfirmedSlot,
   listUpcomingConfirmed,
   cancelBooking,
   getBooking,

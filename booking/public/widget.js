@@ -121,6 +121,7 @@
     this.slot = null;
     this.phase = 'select'; // select | otp | done
     this.hold = null;
+    this.holdToken = null; // losowy token blokady – dowód własności przy zmianie danych i zwalnianiu blokady
     this.busy = false;
     this.captchaToken = null;
     this.captchaWaiters = [];
@@ -273,9 +274,8 @@
     });
     // Zamknięcie strony w trakcie weryfikacji – zwalniamy termin od razu.
     window.addEventListener('pagehide', function () {
-      var id = self.phase === 'otp' && self.hold ? self.hold.bookingId : self.prevBookingId;
-      if (id && navigator.sendBeacon) {
-        navigator.sendBeacon(self.api + '/api/release-hold', JSON.stringify({ bookingId: id }));
+      if (self.holdToken && self.phase !== 'done' && navigator.sendBeacon) {
+        navigator.sendBeacon(self.api + '/api/release-hold', JSON.stringify({ holdToken: self.holdToken }));
       }
     });
   };
@@ -315,10 +315,10 @@
     });
   };
 
-  Widget.prototype._request = function (path, body) {
-    var init = { method: body ? 'POST' : 'GET', credentials: 'omit' };
+  Widget.prototype._request = function (path, body, headers) {
+    var init = { method: body ? 'POST' : 'GET', credentials: 'omit', headers: headers || {} };
     if (body) {
-      init.headers = { 'Content-Type': 'application/json' };
+      init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
     return fetch(this.api + path, init).then(
@@ -414,8 +414,8 @@
     this.loadingMonth = r.key;
     this.$('cal').setAttribute('aria-busy', 'true');
     this._renderTimes();
-    var own = this.hold ? this.hold.bookingId : this.prevBookingId;
-    return this._request('/api/slots?from=' + r.from + '&to=' + r.to + (own ? '&exclude=' + own : ''))
+    // Token własnej blokady w nagłówku (nie w URL) – jej termin nie jest pokazywany jako zajęty.
+    return this._request('/api/slots?from=' + r.from + '&to=' + r.to, null, this.holdToken ? { 'X-Hold-Token': this.holdToken } : null)
       .then(function (data) {
         data.days.forEach(function (d) {
           self.days[d.date] = d.slots;
@@ -823,8 +823,8 @@
     this._alert('verify', '');
     var payload = isResend ? this.lastPayload : this._collect();
     if (!payload) return;
-    // ID poprzedniej blokady = dowód, że to ten sam klient (zmiana danych/terminu bez nowego SMS-a).
-    payload.previousBookingId = (this.hold && this.hold.bookingId) || this.prevBookingId || undefined;
+    // Token blokady = dowód, że to ten sam klient (zmiana danych/terminu bez nowego SMS-a).
+    payload.holdToken = this.holdToken || undefined;
     payload.resend = !!isResend;
     var btnRef = isResend ? 'resendBtn' : 'sendBtn';
     this._setBusy(btnRef, true, isResend ? 'Wysyłanie…' : 'Wysyłanie kodu…');
@@ -844,7 +844,7 @@
           offset: res.serverNow ? Date.parse(res.serverNow) - Date.now() : 0,
         };
         self.busy = false;
-        self.prevBookingId = null;
+        if (res.holdToken) self.holdToken = res.holdToken;
         if (self.phase !== 'otp' && isResend) return; // klient w międzyczasie kliknął "Zmień dane"
         if (!isResend) {
           self.phase = 'otp';
@@ -889,7 +889,8 @@
       return;
     }
     if (err.code === 'SLOT_UNAVAILABLE') {
-      this._resetToSelect(err.message);
+      // Nowy termin zajęty – poprzednia blokada (jeśli była) zostaje na serwerze, więc zachowujemy jej token.
+      this._resetToSelect(err.message, true);
       return;
     }
     if (err.code === 'HOLD_EXPIRED' || err.code === 'BOOKING_NOT_FOUND') {
@@ -943,13 +944,16 @@
     this._resetToSelect('Czas na wpisanie kodu minął i termin został zwolniony. Wybierz termin ponownie.');
   };
 
-  /** Powrót do wyboru terminu (dane w formularzu zostają). */
-  Widget.prototype._resetToSelect = function (message) {
+  /**
+   * Powrót do wyboru terminu (dane w formularzu zostają).
+   * keepToken – blokada na serwerze nadal istnieje (np. nie udało się przenieść jej na zajęty termin).
+   */
+  Widget.prototype._resetToSelect = function (message, keepToken) {
     this._stopTimer();
     this._stopWebOtp();
     this.phase = 'select';
     this.hold = null;
-    this.prevBookingId = null;
+    if (!keepToken) this.holdToken = null;
     this.busy = false;
     this.slot = null;
     this._lock(false);
@@ -965,12 +969,11 @@
 
   /**
    * Powrót do edycji. Blokada terminu zostaje: po poprawkach serwer przeniesie ją bez nowego SMS-a,
-   * jeśli kod z poprzedniego SMS-a jest jeszcze ważny. Termin klienta nie jest liczony jako zajęty (exclude).
+   * jeśli kod z poprzedniego SMS-a jest jeszcze ważny. Termin klienta nie jest liczony jako zajęty (X-Hold-Token).
    */
   Widget.prototype.changeData = function () {
     var self = this;
     if (this.busy) return;
-    this.prevBookingId = this.hold ? this.hold.bookingId : this.prevBookingId;
     var keep = this.slot;
     this._stopTimer();
     this._stopWebOtp();
@@ -994,6 +997,7 @@
     this._stopTimer();
     this._stopWebOtp();
     this.phase = 'done';
+    this.holdToken = null;
     this.booking = booking;
     var tz = this.cfg.timezone;
     var timeFmt = new Intl.DateTimeFormat('pl-PL', { hour: '2-digit', minute: '2-digit', timeZone: tz });

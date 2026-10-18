@@ -36,7 +36,7 @@ function createApp({ config, pool, availability, bookings, logger }) {
   const apiCors = cors({
     origin: (origin, cb) => cb(null, !origin || allowAll || config.allowedOrigins.includes(origin)),
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type'],
+    allowedHeaders: ['Content-Type', 'X-Hold-Token'],
     maxAge: 600,
   });
 

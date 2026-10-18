@@ -18,7 +18,7 @@ async function slotsOn(ctx) {
 }
 const wrongCode = (code) => (code === '000000' ? '111111' : '000000');
 
-test('usunięcie wydarzenia w Google Calendar od razu zwalnia termin (zajęcia indywidualne)', async () => {
+test('usunięcie wydarzenia w Google Calendar zwalnia termin przy najbliższej synchronizacji (co minutę)', async () => {
   const ctx = await createTestContext();
   try {
     const sent = await ctx.api('/api/send-otp', { body: victim });
@@ -27,13 +27,12 @@ test('usunięcie wydarzenia w Google Calendar od razu zwalnia termin (zajęcia i
 
     const ev = [...ctx.calendar.events.values()][0];
     await ctx.calendar.deleteEvent(ev.id);
-    assert.ok((await slotsOn(ctx)).includes(SLOT_A), 'termin wolny od razu po usunięciu wydarzenia');
-    const other = await ctx.api('/api/send-otp', { body: { ...victim, phone: '511222333' }, ip: '10.0.0.2' });
-    assert.equal(other.status, 200);
-
-    ctx.clock.advanceMinutes(6);
+    ctx.clock.advanceMinutes(1);
     const m = await ctx.services.bookings.runMaintenance();
     assert.equal(m.cancelledInCalendar, 1, 'status w bazie uzgodniony z kalendarzem');
+    assert.ok((await slotsOn(ctx)).includes(SLOT_A), 'termin wolny po synchronizacji');
+    const other = await ctx.api('/api/send-otp', { body: { ...victim, phone: '511222333' }, ip: '10.0.0.2' });
+    assert.equal(other.status, 200);
   } finally {
     await ctx.close();
   }
@@ -48,7 +47,7 @@ test('zajęcia grupowe: usunięcie wydarzenia zwalnia miejsce po synchronizacji'
     }
     assert.ok(!(await slotsOn(g)).includes(SLOT_A), 'grupa pełna');
     await g.calendar.deleteEvent([...g.calendar.events.keys()][0]);
-    g.clock.advanceMinutes(6);
+    g.clock.advanceMinutes(1);
     await g.services.bookings.runMaintenance();
     assert.ok((await slotsOn(g)).includes(SLOT_A), 'zwolnione miejsce w grupie');
   } finally {
@@ -65,9 +64,9 @@ test('nieudana ponowna wysyłka nie zeruje prób, nie przedłuża blokady i nie 
     for (let i = 0; i < 4; i++) await ctx.api('/api/verify-otp', { body: { bookingId: id, code: wrongCode(code) } });
     ctx.clock.advanceMinutes(2);
     ctx.sms.send = async () => {
-      throw new SmsError('numer na czarnej liście', { provider: 'capture', code: 13 });
+      throw new SmsError('numer na czarnej liście', { provider: 'capture', code: 13, definitive: true });
     };
-    const resend = await ctx.api('/api/send-otp', { body: { ...victim, previousBookingId: id, resend: true } });
+    const resend = await ctx.api('/api/send-otp', { body: { ...victim, holdToken: sent.data.holdToken, resend: true } });
     assert.equal(resend.status, 502);
     const row = (await ctx.pool.query('SELECT * FROM bookings WHERE id = $1', [id])).rows[0];
     assert.equal(row.otp_attempts, 4, 'licznik prób zachowany');
@@ -150,7 +149,7 @@ test('"Zmień dane": poprawka imienia i terminu bez nowego SMS-a i bez blokady c
     const first = await ctx.api('/api/send-otp', { body: { ...victim, firstName: 'Ana' } });
     const code = ctx.sms.lastCode();
     const fixed = await ctx.api('/api/send-otp', {
-      body: { ...victim, firstName: 'Anna', slotStart: SLOT_B, previousBookingId: first.data.bookingId },
+      body: { ...victim, firstName: 'Anna', slotStart: SLOT_B, holdToken: first.data.holdToken },
     });
     assert.equal(fixed.status, 200, JSON.stringify(fixed.data));
     assert.equal(fixed.data.smsSent, false);
@@ -169,7 +168,7 @@ test('"Zmień dane" z innym numerem: poprzednia blokada zwolniona, nowy SMS na n
   try {
     const first = await ctx.api('/api/send-otp', { body: victim });
     const second = await ctx.api('/api/send-otp', {
-      body: { ...victim, phone: '512345678', previousBookingId: first.data.bookingId },
+      body: { ...victim, phone: '512345678', holdToken: first.data.holdToken },
     });
     assert.equal(second.status, 200);
     assert.equal(second.data.smsSent, true);
@@ -188,7 +187,7 @@ test('"Wyślij ponownie" (resend) wymusza nowy kod dla tej samej rezerwacji', as
     const first = await ctx.api('/api/send-otp', { body: victim });
     ctx.clock.advanceMinutes(1);
     const again = await ctx.api('/api/send-otp', {
-      body: { ...victim, previousBookingId: first.data.bookingId, resend: true },
+      body: { ...victim, holdToken: first.data.holdToken, resend: true },
     });
     assert.equal(again.data.smsSent, true);
     assert.equal(again.data.bookingId, first.data.bookingId);

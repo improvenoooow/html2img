@@ -65,7 +65,8 @@ Zasady zajętości:
 | Wyczerpanie środków SMS („SMS pumping”) | Wysyłka tylko na **polskie numery komórkowe**; max **3 SMS / numer / h**; max **5 SMS / IP / h**; min. **60 s** między SMS-ami na numer; **dzienny limit globalny** (domyślnie 150); limit żądań HTTP na IP; honeypot; opcjonalnie **Cloudflare Turnstile** |
 | Zgadywanie kodu | Kod 6 cyfr z CSPRNG, ważny 5 min, max 5 prób na kod, porównanie w stałym czasie, limit prób weryfikacji na IP |
 | Wyciek bazy | Kod OTP zapisywany tylko jako HMAC-SHA256; numery i IP w dzienniku limitów tylko jako HMAC (pseudonimizacja) |
-| Podwójna rezerwacja (wyścig) | Przydział terminu i limity w jednej transakcji z blokadą `pg_advisory_xact_lock` (przetestowane 5 równoległymi żądaniami) |
+| Podwójna rezerwacja (wyścig) | Przydział terminu i limity w jednej transakcji z blokadą `pg_advisory_xact_lock` (przetestowane 5 równoległymi żądaniami). Baza twardo blokuje potwierdzone terminy, niezależnie od opóźnień Free/Busy w Google |
+| Przejęcie cudzej blokady | Zmiana danych/terminu i zwolnienie blokady tylko z losowym tokenem blokady. Znajomość numeru telefonu ani ID rezerwacji nie wystarcza |
 | Podwójne wydarzenie w GCal | ID wydarzenia wyliczany z ID rezerwacji, więc ponowienie po błędzie sieci nie tworzy duplikatu |
 | Awaria w trakcie zapisu | Zadanie okresowe naprawia rezerwacje zawieszone w stanie `confirming` |
 | Nadużycia z obcych stron | CORS tylko dla domen z `ALLOWED_ORIGINS`; nagłówki bezpieczeństwa (Helmet) |
@@ -291,8 +292,8 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 - **Blokowanie czasu** (urlop, prywatne sprawy, zajęcia grupowe): dodaj wydarzenie w Google Calendar.
   Musi mieć ustawienie **„Zajęty”**. Uwaga: wydarzenia całodniowe Google domyślnie oznacza jako **„Dostępny”**,
   więc przy blokowaniu całych dni zmień to na „Zajęty”.
-- **Odwołanie rezerwacji:** usuń wydarzenie z kalendarza. Przy zajęciach indywidualnych termin od razu znów
-  będzie dostępny, przy grupowych miejsce zwolni się w ciągu 5 minut.
+- **Odwołanie rezerwacji:** usuń wydarzenie z kalendarza. Termin (albo miejsce w grupie) wróci do puli w ciągu
+  około minuty. **Przesunięcie** wydarzenia w kalendarzu też jest automatycznie przenoszone do systemu.
 - **Święta / zamknięcie:** wydarzenie „Zajęty” w kalendarzu albo zmienna `CLOSED_DATES`.
 - **Zmiana godzin pracy / długości zajęć:** zmienne `WORKING_HOURS`, `SLOT_DURATION_MIN`, `BUFFER_MIN`.
 - **Zajęcia grupowe:** `SLOT_CAPACITY=6` (liczba miejsc). Wydarzenia rezerwacji są wtedy „Dostępne”,
@@ -309,16 +310,22 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 | Metoda | Ścieżka | Opis |
 |---|---|---|
 | GET | `/api/config` | Parametry dla widgetu (strefa, długość zajęć, horyzont, klucz Turnstile) |
-| GET | `/api/slots?from=RRRR-MM-DD&to=RRRR-MM-DD` | Wolne terminy (max 62 dni) |
-| POST | `/api/send-otp` | `{ slotStart, firstName, lastName, phone, email?, consent: true, captchaToken? }` → soft lock + SMS |
+| GET | `/api/slots?from=RRRR-MM-DD&to=RRRR-MM-DD` | Wolne terminy (max 62 dni). Nagłówek `X-Hold-Token` ukrywa własną blokadę klienta |
+| POST | `/api/send-otp` | `{ slotStart, firstName, lastName, phone, email?, consent: true, captchaToken?, holdToken?, resend? }` → soft lock + SMS. Przy nowej blokadzie zwraca `holdToken` |
 | POST | `/api/verify-otp` | `{ bookingId, code }` → potwierdzenie i wydarzenie w GCal |
-| POST | `/api/release-hold` | `{ bookingId }` → natychmiastowe zwolnienie blokady |
+| POST | `/api/release-hold` | `{ holdToken }` → natychmiastowe zwolnienie blokady (np. przy zamknięciu strony) |
+
+**Token blokady (`holdToken`).** To losowy sekret zwracany przy utworzeniu blokady, w bazie przechowywany tylko jako
+SHA-256. Jest jedynym dowodem, że kolejne żądanie pochodzi od tego samego klienta. Z tokenem można zmienić termin
+lub dane bez nowego SMS-a (`smsSent: false`, jeśli kod jest nadal ważny), wymusić nowy kod (`resend: true`) i
+zwolnić blokadę. Samo ID rezerwacji nie daje żadnej kontroli, bo nie jest tajne: trafia do analityki i do opisu
+wydarzenia. Jeden numer może mieć najwyżej 2 niepotwierdzone blokady naraz.
 | GET | `/health` | Stan usługi i bazy |
 
 Błędy mają format `{ "error": { "code": "SLOT_UNAVAILABLE", "message": "…po polsku…" } }`.
 Kody: `VALIDATION_ERROR`, `SLOT_UNAVAILABLE`, `RATE_LIMITED`, `RESEND_COOLDOWN`, `SMS_DAILY_LIMIT`,
 `SMS_SEND_FAILED`, `CALENDAR_UNAVAILABLE`, `CAPTCHA_FAILED`, `OTP_INVALID` (+`attemptsLeft`), `OTP_EXPIRED`,
-`OTP_LOCKED`, `HOLD_EXPIRED`, `BOOKING_NOT_FOUND`, `CONFIRM_IN_PROGRESS`. Przy 429 serwer wysyła też nagłówek `Retry-After`.
+`OTP_LOCKED`, `HOLD_EXPIRED`, `BOOKING_NOT_FOUND`, `CONFIRM_IN_PROGRESS`, `TOO_MANY_HOLDS`. Przy 429 serwer wysyła też nagłówek `Retry-After`.
 
 ## Testy
 

@@ -139,7 +139,6 @@ class AvailabilityService {
       const [busy, active] = await Promise.all([
         this.getBusy(rangeStart, rangeEnd),
         repo.listActiveInRange(this.pool, rangeStart, rangeEnd, this.clock.now(), {
-          includeConfirmed: this.cfg.slotCapacity > 1,
           excludeId: excludeBookingId,
         }),
       ]);

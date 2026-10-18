@@ -46,6 +46,7 @@ class TwilioProvider {
         code,
         // 20003: autoryzacja, 21606/21659: nieprawidłowy nadawca, 20429: limit konta
         configProblem: res.status === 401 || [20003, 21606, 21659, 20429].includes(Number(code)),
+        definitive: res.status >= 400 && res.status < 500,
       });
     }
     return { id: data?.sid ?? null };

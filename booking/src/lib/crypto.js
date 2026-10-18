@@ -29,4 +29,13 @@ function pseudonymize(secret, kind, value) {
   return hmac(secret, `${kind}:${value}`);
 }
 
-module.exports = { generateOtp, hashOtp, safeEqualHex, pseudonymize, hmac };
+/** Losowy token blokady (192 bity) – zwracany klientowi, w bazie trzymamy tylko jego SHA-256. */
+function generateHoldToken() {
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+function hashHoldToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+module.exports = { generateOtp, hashOtp, safeEqualHex, pseudonymize, hmac, generateHoldToken, hashHoldToken };

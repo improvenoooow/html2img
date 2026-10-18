@@ -52,4 +52,16 @@ module.exports = [
       CREATE INDEX sms_log_created_idx ON sms_log (created_at);
     `,
   },
+  {
+    id: 2,
+    name: 'hold_token_and_version',
+    sql: `
+      -- Losowy token blokady (w bazie tylko hash SHA-256) – dowód, że żądanie pochodzi od klienta,
+      -- który utworzył blokadę. ID rezerwacji nie jest tajne (trafia do analityki i opisu wydarzenia).
+      ALTER TABLE bookings ADD COLUMN hold_token_hash text;
+      CREATE UNIQUE INDEX bookings_hold_token_idx ON bookings (hold_token_hash) WHERE hold_token_hash IS NOT NULL;
+      -- Wersja wiersza do optymistycznej kontroli współbieżności (przywracanie po nieudanej wysyłce SMS).
+      ALTER TABLE bookings ADD COLUMN version integer NOT NULL DEFAULT 0;
+    `,
+  },
 ];

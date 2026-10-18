@@ -38,7 +38,7 @@ class CapturingSms {
   async send(to, message) {
     if (this.failNext > 0) {
       this.failNext--;
-      throw new SmsError('symulowana awaria bramki', { provider: 'capture', code: 500 });
+      throw new SmsError('symulowana odmowa bramki', { provider: 'capture', code: 400, definitive: true });
     }
     this.sent.push({ to, message });
     return { id: `cap-${this.sent.length}` };
