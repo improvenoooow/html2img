@@ -220,6 +220,10 @@ Wklej w miejscu, gdzie ma się pojawić formularz:
 
 - **WordPress (Gutenberg):** blok **„Własny HTML”** → wklej kod powyżej.
 - **Elementor:** widżet **HTML**.
+- **WordPress – wtyczka (zalecane):** `integrations/wordpress/pilanka-booking`. Spakuj katalog do ZIP i wgraj
+  w *Wtyczki → Dodaj nową*. Adres serwera i telefon ustawisz w *Ustawienia → Rezerwacje Pilanka*, a formularz wstawisz
+  shortcodem `[pilanka_rezerwacja]`. Wtyczka ładuje skrypt tylko na stronie z formularzem i dodaje zdarzenie konwersji
+  dla GA4, Meta Pixel i GTM.
 - **Czysty HTML:** wklej w treść strony.
 
 Opcje (atrybuty `data-*`):
@@ -292,6 +296,10 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 - **Zmiana godzin pracy / długości zajęć:** zmienne `WORKING_HOURS`, `SLOT_DURATION_MIN`, `BUFFER_MIN`.
 - **Zajęcia grupowe:** `SLOT_CAPACITY=6` (liczba miejsc). Wydarzenia rezerwacji są wtedy „Dostępne”,
   żeby nie blokowały pozostałych miejsc, a zajętość liczy baza.
+- **Alerty na telefon:** zainstaluj aplikację **ntfy** (Android/iOS), zasubskrybuj trudny do zgadnięcia temat,
+  np. `pilanka-rezerwacje-7f3k9q`, i ustaw `ALERT_WEBHOOK_URL=https://ntfy.sh/pilanka-rezerwacje-7f3k9q`
+  (działa też webhook Discord/Slack). Dostaniesz powiadomienie, gdy: bramka SMS odrzuca wysyłkę (brak punktów,
+  zły token), saldo spada poniżej `SMS_LOW_BALANCE_ALERT`, padnie dzienny limit SMS albo Google Calendar nie odpowiada.
 - **Monitoring:** w logach (`docker compose logs app`) szukaj `sms_provider_config_error` (zły token lub brak środków) oraz
   `sms_global_daily_limit_reached`.
 
@@ -315,8 +323,12 @@ Kody: `VALIDATION_ERROR`, `SLOT_UNAVAILABLE`, `RATE_LIMITED`, `RESEND_COOLDOWN`,
 
 ```bash
 npm test             # jednostkowe + integracyjne (wymaga PostgreSQL: TEST_DATABASE_URL)
-npm run test:e2e     # przeglądarka (Playwright + Chromium: npx playwright install chromium)
+npm run test:e2e     # przeglądarka + audyt dostępności WCAG 2.1 AA (npx playwright install chromium)
+npm run test:wp      # wtyczka WordPress (wymaga PHP)
 ```
+
+W repozytorium jest gotowe CI (`.github/workflows/ci.yml`). Przy każdym pushu uruchamia wszystkie testy na
+PostgreSQL, buduje obraz Dockera i sprawdza konfigurację VPS.
 
 Testy integracyjne działają na prawdziwym PostgreSQL przez HTTP, z kontrolowanym zegarem. Obejmują m.in.
 wyścig 5 osób o jeden termin, wygasanie soft locka po 10 min i kodu po 5 min, wszystkie limity SMS,

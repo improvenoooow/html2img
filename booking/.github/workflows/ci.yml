@@ -1,0 +1,70 @@
+# CI dla repozytorium pilanka-booking (katalog booking/ jako korzeń repo).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Testy (jednostkowe, integracyjne, E2E, dostępność, WordPress)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: booking
+          POSTGRES_PASSWORD: booking
+          POSTGRES_DB: booking_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U booking"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://booking:booking@localhost:5432/booking_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Testy jednostkowe i integracyjne
+        run: npm test
+      - name: Przeglądarka do testów E2E
+        run: npx playwright install --with-deps chromium
+      - name: Testy E2E i audyt dostępności (WCAG 2.1 AA)
+        run: npm run test:e2e
+      - name: Wtyczka WordPress
+        run: |
+          php -l integrations/wordpress/pilanka-booking/pilanka-booking.php
+          npm run test:wp
+
+  docker:
+    name: Obraz Docker i konfiguracja VPS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Budowa obrazu
+        run: docker build -t pilanka-booking:ci .
+      - name: Start obrazu (walidacja konfiguracji produkcyjnej)
+        run: |
+          out=$(docker run --rm -e NODE_ENV=production pilanka-booking:ci 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "Nieprawidłowa konfiguracja"
+      - name: Walidacja docker-compose (VPS)
+        working-directory: deploy/vps
+        run: |
+          cp .env.example .env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci/' .env
+          docker compose config --quiet
+          docker compose --profile caddy config --quiet

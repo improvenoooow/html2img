@@ -78,14 +78,14 @@ async function resetDatabase(pool) {
 /**
  * Uruchamia pełną aplikację (prawdziwy Postgres, HTTP) z podmienionym kalendarzem, bramką SMS i zegarem.
  */
-async function createTestContext({ env = {}, clock = new FakeClock(), captcha } = {}) {
+async function createTestContext({ env = {}, clock = new FakeClock(), captcha, alerter } = {}) {
   const config = loadConfig(testEnv(env));
   const logger = createLogger({ level: 'silent' });
   const pool = createPool(config.database);
   await resetDatabase(pool);
   const calendar = new MockCalendar({ calendarId: 'studio@test' });
   const sms = new CapturingSms();
-  const services = buildServices({ config, pool, logger, clock, calendar, sms, captcha });
+  const services = buildServices({ config, pool, logger, clock, calendar, sms, captcha, alerter });
   const app = createApp({ config, pool, ...services, logger });
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));

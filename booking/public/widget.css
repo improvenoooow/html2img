@@ -53,6 +53,10 @@
   --plb-success-soft: #1b3326;
   --plb-focus: #8ab4f8;
   --plb-shadow: none;
+  /* Nagłówek i stopka leżą poza kartami – w ciemnym motywie widget musi mieć własne tło,
+     inaczej jasny tekst byłby nieczytelny na jasnej stronie (np. motyw "auto" przy telefonie w trybie ciemnym). */
+  --plb-bg: #0f1113;
+  --plb-pad: 20px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -72,6 +76,8 @@
     --plb-success-soft: #1b3326;
     --plb-focus: #8ab4f8;
     --plb-shadow: none;
+    --plb-bg: #0f1113;
+    --plb-pad: 20px;
   }
 }
 
@@ -79,6 +85,8 @@
 
 .plb {
   background: var(--plb-bg);
+  padding: var(--plb-pad, 0);
+  border-radius: var(--plb-radius);
   font-size: 17px;
   max-width: 980px;
   margin: 0 auto;

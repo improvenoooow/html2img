@@ -50,6 +50,22 @@ class TwilioProvider {
     }
     return { id: data?.sid ?? null };
   }
+
+  /** Saldo konta (GET /Balance.json). */
+  async getBalance() {
+    const res = await this.fetch(`${this.baseUrl}/2010-04-01/Accounts/${encodeURIComponent(this.accountSid)}/Balance.json`, {
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64')}`,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.balance === undefined) {
+      throw new SmsError(`Twilio: nie można odczytać salda (${data?.message || res.status})`, { provider: this.name });
+    }
+    return { amount: Number(data.balance), unit: data.currency || '' };
+  }
 }
 
 module.exports = { TwilioProvider };

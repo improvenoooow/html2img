@@ -56,6 +56,19 @@ class SmsapiProvider {
     const item = data.list?.[0];
     return { id: item?.id ?? null, points: item?.points ?? null };
   }
+
+  /** Saldo konta w punktach (GET /profile). */
+  async getBalance() {
+    const res = await this.fetch(`${this.baseUrl}/profile`, {
+      headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.points === undefined) {
+      throw new SmsError(`SMSAPI: nie można odczytać salda (${data?.message || res.status})`, { provider: this.name });
+    }
+    return { amount: Number(data.points), unit: 'pkt' };
+  }
 }
 
 module.exports = { SmsapiProvider };

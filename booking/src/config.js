@@ -215,6 +215,18 @@ function loadConfig(env = process.env, opts = {}) {
     problems.push('TURNSTILE_SITE_KEY i TURNSTILE_SECRET_KEY muszą być ustawione razem');
   }
 
+  const alerts = {
+    webhookUrl: str('ALERT_WEBHOOK_URL') || null,
+    cooldownMinutes: int('ALERT_COOLDOWN_MINUTES', 60, { min: 1, max: 24 * 60 }),
+    smsLowBalance: env.SMS_LOW_BALANCE_ALERT ? Number(env.SMS_LOW_BALANCE_ALERT) : null,
+  };
+  if (alerts.webhookUrl && !/^https:\/\/[^\s]+$/i.test(alerts.webhookUrl)) {
+    problems.push('ALERT_WEBHOOK_URL musi być adresem https://');
+  }
+  if (alerts.smsLowBalance !== null && !(alerts.smsLowBalance >= 0)) {
+    problems.push('SMS_LOW_BALANCE_ALERT musi być liczbą ≥ 0 (próg salda bramki SMS)');
+  }
+
   const database = {
     url: str('DATABASE_URL'),
     ssl: bool('DATABASE_SSL', false),
@@ -241,6 +253,7 @@ function loadConfig(env = process.env, opts = {}) {
     gcal,
     sms,
     turnstile,
+    alerts,
     warnings,
   };
 }

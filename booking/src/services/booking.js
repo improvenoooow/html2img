@@ -31,7 +31,7 @@ function eventIdFor(bookingId) {
 }
 
 class BookingService {
-  constructor({ config, pool, calendar, availability, sms, captcha, clock, logger }) {
+  constructor({ config, pool, calendar, availability, sms, captcha, clock, logger, alerts = { notify() {} } }) {
     this.config = config;
     this.pool = pool;
     this.calendar = calendar;
@@ -40,6 +40,8 @@ class BookingService {
     this.captcha = captcha;
     this.clock = clock;
     this.logger = logger;
+    this.alerts = alerts;
+    this._lastBalanceCheck = 0;
   }
 
   validateRequest(body) {
@@ -96,6 +98,11 @@ class BookingService {
     }
     if (stats.global_count >= limits.smsGlobalPerDay) {
       this.logger.error('sms_global_daily_limit_reached', { limit: limits.smsGlobalPerDay });
+      this.alerts.notify(
+        'sms_daily_limit',
+        `Osiągnięto dzienny limit ${limits.smsGlobalPerDay} SMS-ów (SMS_LIMIT_GLOBAL_DAY). Rezerwacje online są wstrzymane do jutra. ` +
+          'Jeśli to normalny ruch – podnieś limit; jeśli nie – ktoś może nadużywać formularza.',
+      );
       throw Errors.smsDailyLimit();
     }
   }
@@ -191,6 +198,13 @@ class BookingService {
         provider: this.sms.name,
         code: err.code,
       });
+      if (err.configProblem) {
+        this.alerts.notify(
+          'sms_config',
+          `Bramka SMS (${this.sms.name}) odrzuca wysyłkę: ${err.message}. Klienci nie mogą potwierdzić rezerwacji – ` +
+            'sprawdź saldo, token i nazwę nadawcy.',
+        );
+      }
       // Nieudana wysyłka nie zużywa limitu klienta; nowa rezerwacja zwalnia termin.
       await withTransaction(this.pool, async (db) => {
         await repo.deleteSmsLog(db, hold.smsLogId);
@@ -258,6 +272,7 @@ class BookingService {
       }
       await repo.revertToPending(this.pool, b.id, this.clock.now());
       this.logger.error('gcal_insert_failed', { err, bookingId: b.id });
+      this.alerts.notify('gcal_insert', `Nie można zapisać rezerwacji w Google Calendar: ${err.message}`);
       throw Errors.calendarUnavailable();
     }
 
@@ -332,6 +347,26 @@ class BookingService {
    * (np. restart serwera w trakcie zapisu do GCal) i usuwa stare dane osobowe (RODO).
    * Wykonywane tylko przez jedną instancję naraz (advisory lock).
    */
+  /** Raz na godzinę: ostrzeżenie, gdy saldo bramki SMS spada poniżej SMS_LOW_BALANCE_ALERT. */
+  async _checkSmsBalance() {
+    const threshold = this.config.alerts.smsLowBalance;
+    if (threshold === null || typeof this.sms.getBalance !== 'function') return;
+    if (Date.now() - this._lastBalanceCheck < 3_600_000) return;
+    this._lastBalanceCheck = Date.now();
+    try {
+      const balance = await this.sms.getBalance();
+      if (balance.amount < threshold) {
+        this.logger.warn('sms_low_balance', balance);
+        this.alerts.notify(
+          'sms_low_balance',
+          `Niskie saldo bramki SMS: ${balance.amount} ${balance.unit} (próg ${threshold}). Doładuj konto, zanim zabraknie na kody.`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn('sms_balance_check_failed', { err });
+    }
+  }
+
   async runMaintenance() {
     const client = await this.pool.connect();
     try {
@@ -356,6 +391,7 @@ class BookingService {
           confirmedSlotEndBefore: new Date(now - this.config.booking.retentionDays * DAY),
           smsLogBefore: new Date(now - 2 * DAY),
         });
+        await this._checkSmsBalance();
         const summary = { expired, reconciled, ...purged };
         if (expired || reconciled || purged.inactive || purged.confirmed) this.logger.info('maintenance', summary);
         return summary;

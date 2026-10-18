@@ -12,13 +12,14 @@ const MAX_RANGE_DAYS = 62;
  * − aktywne rezerwacje i soft locki w bazie (z uwzględnieniem pojemności slotu).
  */
 class AvailabilityService {
-  constructor({ config, calendar, pool, clock, logger }) {
+  constructor({ config, calendar, pool, clock, logger, alerts = { notify() {} } }) {
     this.cfg = config.booking;
     this.cacheMs = config.gcal.cacheSeconds * 1000;
     this.calendar = calendar;
     this.pool = pool;
     this.clock = clock;
     this.logger = logger;
+    this.alerts = alerts;
     this._cache = new Map();
   }
 
@@ -36,6 +37,10 @@ class AvailabilityService {
       busy = await this.calendar.freeBusy(from, to);
     } catch (err) {
       this.logger.error('gcal_freebusy_failed', { err });
+      this.alerts.notify(
+        'gcal',
+        `Google Calendar nie odpowiada – klienci nie widzą wolnych terminów i nie mogą rezerwować.\nBłąd: ${err.message}`,
+      );
       throw Errors.calendarUnavailable();
     }
     if (this.cacheMs > 0) {
