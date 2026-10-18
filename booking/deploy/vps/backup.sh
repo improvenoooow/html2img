@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Kopia zapasowa bazy rezerwacji (pg_dump + gzip) z rotacją.
-# Cron (codziennie 3:15):  15 3 * * * /opt/pilanka-booking/booking/deploy/vps/backup.sh >> /var/log/pilanka-backup.log 2>&1
+# Cron (codziennie 3:15):  15 3 * * * /opt/pilanka-booking/deploy/vps/backup.sh >> /var/log/pilanka-backup.log 2>&1
 # Odtworzenie:  gunzip -c PLIK.sql.gz | docker compose exec -T db psql -U booking -d booking
 set -euo pipefail
 cd "$(dirname "$0")"

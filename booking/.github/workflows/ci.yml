@@ -1,4 +1,4 @@
-# CI dla repozytorium pilanka-booking (katalog booking/ jako korzeń repo).
+# CI dla repozytorium pilanka-booking.
 name: CI
 
 on:

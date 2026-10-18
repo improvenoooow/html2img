@@ -78,7 +78,7 @@ Klucze (Service Account, token SMS) są **wyłącznie na serwerze**. Nigdy nie t
 Tryb deweloperski: kalendarz w pamięci (`GCAL_PROVIDER=mock`), a kody SMS trafiają do logów (`SMS_PROVIDER=console`).
 
 ```bash
-cd booking
+cd pilanka-booking
 docker compose up --build
 # → http://localhost:8080/demo   (kod SMS znajdziesz w logach kontenera "app")
 ```
@@ -86,7 +86,7 @@ docker compose up --build
 Bez Dockera (wymagany PostgreSQL ≥ 13 i Node.js ≥ 20):
 
 ```bash
-cd booking
+cd pilanka-booking
 npm install
 DATABASE_URL=postgres://user:pass@localhost:5432/booking npm run dev
 ```
@@ -141,7 +141,8 @@ Usługa zużywa ok. 160 MB RAM (zmierzone: aplikacja ~90 MB, PostgreSQL ~70 MB).
 
 ```bash
 sudo mkdir -p /opt/pilanka-booking && sudo chown $USER /opt/pilanka-booking
-git clone <adres-repo> /opt/pilanka-booking && cd /opt/pilanka-booking/booking/deploy/vps
+git clone https://github.com/improvenoooow/pilanka-booking.git /opt/pilanka-booking
+cd /opt/pilanka-booking/deploy/vps
 cp .env.example .env && nano .env        # hasła: openssl rand -hex 24 / openssl rand -hex 32
 ```
 
@@ -187,9 +188,7 @@ Zginęłyby tylko trwające w danej chwili blokady i dziennik limitów SMS.
 ## Alternatywa: Railway
 
 1. W projekcie Railway: **New → Database → PostgreSQL**.
-2. **New → GitHub Repo** → to repozytorium, a w ustawieniach nowej usługi:
-   - **Root Directory:** `booking`
-   - **Config file path:** `/booking/railway.json`
+2. **New → GitHub Repo** → repozytorium `pilanka-booking` (Railway sam użyje `railway.json` i `Dockerfile`).
 3. **Variables** (pełna lista z opisami w [`.env.example`](.env.example)), minimum:
    ```
    NODE_ENV=production
