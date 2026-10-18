@@ -5,7 +5,7 @@ który nie jest zajęty w Google Calendar studia. Następnie podaje dane i potwi
 kodem SMS. Po weryfikacji rezerwacja trafia do kalendarza jako
 `Rezerwacja: Imię Nazwisko - +48 600 123 456`.
 
-System działa jako osobna usługa (Node.js + PostgreSQL, np. na Railway). Na stronę wkleja się
+System działa jako osobna usługa (Node.js + PostgreSQL w Dockerze, na własnym VPS lub w chmurze). Na stronę wkleja się
 **jeden fragment kodu**, więc działa niezależnie od technologii strony: WordPress, czysty HTML, kreatory stron.
 
 ---
@@ -18,7 +18,7 @@ System działa jako osobna usługa (Node.js + PostgreSQL, np. na Railway). Na st
 4. [Uruchomienie lokalne (bez kluczy)](#uruchomienie-lokalne-bez-kluczy)
 5. [Konfiguracja Google Calendar](#konfiguracja-google-calendar-service-account)
 6. [Konfiguracja bramki SMS](#konfiguracja-bramki-sms)
-7. [Wdrożenie na Railway](#wdrożenie-na-railway)
+7. [Wdrożenie na własnym VPS](#wdrożenie-na-własnym-vps-zalecane) (alternatywa: [Railway](#alternatywa-railway))
 8. [Osadzenie na stronie](#osadzenie-na-stronie)
 9. [Codzienna obsługa przez studio](#codzienna-obsługa-przez-studio)
 10. [API](#api)
@@ -113,7 +113,7 @@ GOOGLE_CALENDAR_ID=... GOOGLE_SERVICE_ACCOUNT_FILE=./klucz.json npm run gcal:che
 Skrypt sprawdza kolejno: uwierzytelnienie, dostęp do kalendarza, odczyt Free/Busy i listę wolnych terminów.
 Przy problemie podpowiada, co poprawić.
 
-> Na Railway najwygodniej wkleić całą zawartość pliku JSON do zmiennej `GOOGLE_SERVICE_ACCOUNT_JSON`.
+> Na serwerze najwygodniej podać klucz jako jedną linię base64: `GOOGLE_SERVICE_ACCOUNT_BASE64=$(base64 -w0 klucz.json)`.
 
 ## Konfiguracja bramki SMS
 
@@ -133,7 +133,58 @@ Domyślna treść SMS-a nie ma polskich znaków, dzięki czemu mieści się w je
 Po ustawieniu `OTP_WEBOTP_DOMAIN=pilankapilatestczew.pl` Chrome na Androidzie sam podpowie kod z SMS-a.
 Safari na iPhonie robi to automatycznie.
 
-## Wdrożenie na Railway
+## Wdrożenie na własnym VPS (zalecane)
+
+Wymagania: Linux (Ubuntu/Debian), Docker z Compose v2 (`curl -fsSL https://get.docker.com | sh`), rekord DNS
+`rezerwacje.pilankapilatestczew.pl` (typ A) wskazujący na IP serwera. Wystarczy 1 vCPU i 1 GB RAM.
+Usługa zużywa ok. 160 MB RAM (zmierzone: aplikacja ~90 MB, PostgreSQL ~70 MB).
+
+```bash
+sudo mkdir -p /opt/pilanka-booking && sudo chown $USER /opt/pilanka-booking
+git clone <adres-repo> /opt/pilanka-booking && cd /opt/pilanka-booking/booking/deploy/vps
+cp .env.example .env && nano .env        # hasła: openssl rand -hex 24 / openssl rand -hex 32
+```
+
+**Wariant A: na VPS nie działa inna strona** (porty 80/443 wolne). Caddy sam zrobi HTTPS:
+
+```bash
+docker compose --profile caddy up -d --build
+```
+
+**Wariant B: na VPS działa już nginx albo Apache** (np. strona studia). Aplikacja słucha tylko na `127.0.0.1:8080`,
+a ruch przekazuje istniejący serwer WWW:
+
+```bash
+docker compose up -d --build
+# nginx:  deploy/vps/nginx-rezerwacje.conf  → /etc/nginx/sites-available/ + certbot --nginx
+# Apache: deploy/vps/apache-rezerwacje.conf → /etc/apache2/sites-available/ + certbot --apache
+```
+
+Sprawdzenie i diagnostyka:
+
+```bash
+curl https://rezerwacje.pilankapilatestczew.pl/health       # {"status":"ok","db":"ok"}
+docker compose exec app node scripts/gcal-check.js --write  # połączenie z Google Calendar
+docker compose exec app node scripts/sms-check.js +48600123456
+docker compose logs -f app                                  # logi na żywo
+```
+
+Utrzymanie:
+
+| Co | Jak |
+|---|---|
+| Restart po awarii / restarcie serwera | automatycznie (`restart: unless-stopped`, Docker uruchamia się z systemem) |
+| Certyfikat HTTPS | odnawiany automatycznie (Caddy albo certbot) |
+| Kopie zapasowe bazy | `deploy/vps/backup.sh`, w cronie codziennie, rotacja 14 dni (instrukcja w pliku) |
+| Aktualizacja wersji | `deploy/vps/update.sh` (git pull + przebudowa + restart, dane zostają) |
+| Logi | rotowane (5 × 10 MB na kontener) |
+
+Bezpieczeństwo VPS: port aplikacji jest dostępny tylko lokalnie. Z internetu otwarte są wyłącznie 80/443
+(np. `ufw allow OpenSSH && ufw allow 80,443/tcp && ufw enable`). Plik `.env` zawiera sekrety, więc `chmod 600 .env`.
+Potwierdzone rezerwacje są też w Google Calendar, więc nawet utrata bazy nie kasuje grafiku.
+Zginęłyby tylko trwające w danej chwili blokady i dziennik limitów SMS.
+
+## Alternatywa: Railway
 
 1. W projekcie Railway: **New → Database → PostgreSQL**.
 2. **New → GitHub Repo** → to repozytorium, a w ustawieniach nowej usługi:
@@ -241,7 +292,7 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 - **Zmiana godzin pracy / długości zajęć:** zmienne `WORKING_HOURS`, `SLOT_DURATION_MIN`, `BUFFER_MIN`.
 - **Zajęcia grupowe:** `SLOT_CAPACITY=6` (liczba miejsc). Wydarzenia rezerwacji są wtedy „Dostępne”,
   żeby nie blokowały pozostałych miejsc, a zajętość liczy baza.
-- **Monitoring:** w logach Railway szukaj `sms_provider_config_error` (zły token lub brak środków) oraz
+- **Monitoring:** w logach (`docker compose logs app`) szukaj `sms_provider_config_error` (zły token lub brak środków) oraz
   `sms_global_daily_limit_reached`.
 
 ## API
@@ -280,4 +331,4 @@ Testy jednostkowe obejmują m.in. zmianę czasu letni/zimowy, podpis JWT Service
 - Dziennik limitów SMS przechowuje tylko pseudonimy (HMAC) numerów i IP i jest czyszczony po 48 h.
 - Logi serwera maskują numery (`+48 600 *** 456`) i nigdy nie zawierają kodów.
 - W polityce prywatności studia warto wymienić odbiorców danych: dostawcę SMS (SMSAPI/Twilio),
-  Google (kalendarz) i hosting (Railway).
+  Google (kalendarz) i dostawcę serwera (VPS).

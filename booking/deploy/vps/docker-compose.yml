@@ -1,0 +1,88 @@
+# Produkcja na własnym VPS.
+#
+#   Wariant A – na VPS nie działa inny serwer WWW (porty 80/443 wolne):
+#       docker compose --profile caddy up -d --build
+#     Caddy sam pobiera i odnawia certyfikat HTTPS (Let's Encrypt).
+#
+#   Wariant B – na VPS działa już nginx/Apache (np. strona studia):
+#       docker compose up -d --build
+#     Aplikacja nasłuchuje tylko na 127.0.0.1:APP_PORT, a ruch przekazuje istniejący
+#     serwer WWW (gotowe konfiguracje: nginx-rezerwacje.conf, apache-rezerwacje.conf).
+#
+# Konfiguracja: skopiuj .env.example do .env i uzupełnij.
+name: pilanka-booking
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Ustaw POSTGRES_PASSWORD w pliku .env}
+      POSTGRES_DB: booking
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking -d booking"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [internal]
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  app:
+    build: ../..
+    image: pilanka-booking:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://booking:${POSTGRES_PASSWORD}@db:5432/booking
+      # Dokładnie jeden reverse proxy przed aplikacją (Caddy albo nginx/Apache).
+      TRUST_PROXY: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Tylko localhost: port nie jest dostępny z internetu (Docker omija reguły ufw dla publicznych portów),
+    # a nagłówka X-Forwarded-For nie da się podrobić z pominięciem proxy.
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks: [internal]
+    logging: *logging
+
+  caddy:
+    profiles: ["caddy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      BOOKING_DOMAIN: ${BOOKING_DOMAIN:?Ustaw BOOKING_DOMAIN w pliku .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks: [internal]
+    logging: *logging
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:

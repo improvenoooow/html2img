@@ -1,0 +1,6 @@
+# Wariant A: Caddy przed aplikacją. Certyfikat HTTPS pobierany i odnawiany automatycznie.
+# Wymaga rekordu DNS A/AAAA domeny BOOKING_DOMAIN wskazującego na ten VPS.
+{$BOOKING_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8080
+}
