@@ -64,19 +64,18 @@ services:
     profiles: ["caddy"]
     image: caddy:2-alpine
     restart: unless-stopped
+    # Sieć hosta: Caddy widzi prawdziwe adresy klientów (także IPv6). Przy mapowaniu portów Dockera klienci IPv6
+    # mogliby dostać wspólny adres bramki i dzielić limity SMS. Ruch do aplikacji idzie przez 127.0.0.1.
+    network_mode: host
     environment:
       BOOKING_DOMAIN: ${BOOKING_DOMAIN:?Ustaw BOOKING_DOMAIN w pliku .env}
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      APP_PORT: ${APP_PORT:-8080}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       - app
-    networks: [internal]
     logging: *logging
 
 volumes:

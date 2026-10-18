@@ -6,6 +6,7 @@ const { Errors } = require('../lib/errors');
 const repo = require('../db/repository');
 
 const MAX_RANGE_DAYS = 62;
+const DAY_MS = 86_400_000;
 
 /**
  * Wyznacza wolne terminy: godziny pracy − zajętość w Google Calendar (Free/Busy, z buforem)
@@ -27,14 +28,42 @@ class AvailabilityService {
     this._cache.clear();
   }
 
+  /**
+   * Zajętość z Google Calendar. Bez `fresh` korzysta z cache w stałych kubełkach miesięcznych (UTC, z zapasem
+   * 1 dnia): dowolny zakres zapytania trafia w ograniczony zestaw kluczy, a równoległe zapytania o ten sam miesiąc
+   * współdzielą jedno wywołanie Google – zmienianie parametrów `from`/`to` nie omija cache i nie wyczerpuje limitów API.
+   */
   async getBusy(from, to, { fresh = false } = {}) {
-    const key = `${from.toISOString()}|${to.toISOString()}`;
+    if (fresh || this.cacheMs <= 0) return this._fetchBusy(from, to);
+    const buckets = [];
+    for (let m = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), 1); m < to.getTime(); ) {
+      buckets.push(m);
+      const d = new Date(m);
+      m = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    }
+    return (await Promise.all(buckets.map((m) => this._bucket(m)))).flat();
+  }
+
+  _bucket(monthStartMs) {
     const nowMs = Date.now();
-    const hit = this._cache.get(key);
-    if (!fresh && this.cacheMs > 0 && hit && hit.expiresAt > nowMs) return hit.busy;
-    let busy;
+    const hit = this._cache.get(monthStartMs);
+    if (hit && hit.expiresAt > nowMs) return hit.promise;
+    const d = new Date(monthStartMs);
+    const promise = this._fetchBusy(
+      new Date(monthStartMs - DAY_MS),
+      new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) + DAY_MS),
+    );
+    const entry = { promise, expiresAt: nowMs + this.cacheMs };
+    this._cache.set(monthStartMs, entry);
+    promise.catch(() => {
+      if (this._cache.get(monthStartMs) === entry) this._cache.delete(monthStartMs);
+    });
+    return promise;
+  }
+
+  async _fetchBusy(from, to) {
     try {
-      busy = await this.calendar.freeBusy(from, to);
+      return await this.calendar.freeBusy(from, to);
     } catch (err) {
       this.logger.error('gcal_freebusy_failed', { err });
       this.alerts.notify(
@@ -43,11 +72,6 @@ class AvailabilityService {
       );
       throw Errors.calendarUnavailable();
     }
-    if (this.cacheMs > 0) {
-      if (this._cache.size > 200) this._cache.clear();
-      this._cache.set(key, { busy, expiresAt: nowMs + this.cacheMs });
-    }
-    return busy;
   }
 
   /** Granice rezerwacji liczone od "teraz": najwcześniejszy i najpóźniejszy możliwy start. */
@@ -86,7 +110,7 @@ class AvailabilityService {
   /**
    * Wolne terminy w dniach [fromDate, toDate] (RRRR-MM-DD w strefie studia), przycięte do horyzontu rezerwacji.
    */
-  async getAvailability(fromDate, toDate) {
+  async getAvailability(fromDate, toDate, { excludeBookingId = null } = {}) {
     const { today, lastDate } = this.bounds();
     const isDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && DateTime.fromISO(d).isValid;
     if (!isDate(fromDate) || !isDate(toDate)) {
@@ -114,7 +138,10 @@ class AvailabilityService {
       const rangeEnd = new Date(Math.max(...slots.map((s) => s.end.getTime())) + bufMs);
       const [busy, active] = await Promise.all([
         this.getBusy(rangeStart, rangeEnd),
-        repo.listActiveInRange(this.pool, rangeStart, rangeEnd, this.clock.now()),
+        repo.listActiveInRange(this.pool, rangeStart, rangeEnd, this.clock.now(), {
+          includeConfirmed: this.cfg.slotCapacity > 1,
+          excludeId: excludeBookingId,
+        }),
       ]);
       for (const slot of slots) {
         if (this._isFree(slot, busy, active)) {

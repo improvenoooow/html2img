@@ -2,6 +2,9 @@
 
 const express = require('express');
 const { rateLimit } = require('express-rate-limit');
+const { clientKey } = require('../lib/ip');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function limiter({ windowMs, limit, message }) {
   return rateLimit({
@@ -9,6 +12,7 @@ function limiter({ windowMs, limit, message }) {
     limit,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
+    keyGenerator: (req) => clientKey(req.ip),
     handler: (req, res, _next, opts) => {
       res.status(429).json({
         error: { code: 'RATE_LIMITED', message, retryAfter: Math.ceil(opts.windowMs / 1000) },
@@ -60,8 +64,10 @@ function createApiRouter({ config, availability, bookings }) {
   });
 
   router.get('/slots', async (req, res) => {
-    const { from, to } = req.query;
-    res.json(await availability.getAvailability(String(from || ''), String(to || from || '')));
+    const { from, to, exclude } = req.query;
+    // exclude = ID własnej blokady klienta (np. po "Zmień dane"), żeby jego termin nie wyglądał na zajęty.
+    const excludeBookingId = typeof exclude === 'string' && UUID_RE.test(exclude) ? exclude : null;
+    res.json(await availability.getAvailability(String(from || ''), String(to || from || ''), { excludeBookingId }));
   });
 
   router.post(

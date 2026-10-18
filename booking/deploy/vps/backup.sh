@@ -11,6 +11,7 @@ mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 
 file="$BACKUP_DIR/booking-$(date +%F-%H%M).sql.gz"
+trap 'rm -f "$file.tmp"' EXIT
 docker compose exec -T db pg_dump -U booking -d booking --no-owner | gzip > "$file.tmp"
 mv "$file.tmp" "$file"
 chmod 600 "$file"

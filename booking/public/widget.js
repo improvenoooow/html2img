@@ -273,8 +273,9 @@
     });
     // Zamknięcie strony w trakcie weryfikacji – zwalniamy termin od razu.
     window.addEventListener('pagehide', function () {
-      if (self.phase === 'otp' && self.hold && navigator.sendBeacon) {
-        navigator.sendBeacon(self.api + '/api/release-hold', JSON.stringify({ bookingId: self.hold.bookingId }));
+      var id = self.phase === 'otp' && self.hold ? self.hold.bookingId : self.prevBookingId;
+      if (id && navigator.sendBeacon) {
+        navigator.sendBeacon(self.api + '/api/release-hold', JSON.stringify({ bookingId: id }));
       }
     });
   };
@@ -346,7 +347,7 @@
   };
 
   Widget.prototype._contactSuffix = function () {
-    return this.opts.contactPhone ? ' Możesz też zadzwonić: ' + this.opts.contactPhone + '.' : '';
+    return this.opts.contactPhone ? ' Możesz też zadzwonić: ' + this.opts.contactPhone + '.' : ''; // tekst – escapuj przy innerHTML
   };
 
   Widget.prototype._start = function () {
@@ -357,6 +358,7 @@
       .then(function (cfg) {
         self.cfg = cfg;
         var privacy = self.opts.privacyUrl || cfg.privacyPolicyUrl;
+        if (privacy && !/^https?:\/\//i.test(privacy)) privacy = null;
         self.$('consentText').innerHTML =
           'Wyrażam zgodę na przetwarzanie moich danych osobowych w celu realizacji rezerwacji' +
           (privacy ? ' zgodnie z <a href="' + esc(privacy) + '" target="_blank" rel="noopener">polityką prywatności</a>' : '') +
@@ -374,7 +376,7 @@
         self.$('cal').setAttribute('aria-busy', 'false');
         self._alert(
           'when',
-          'Nie udało się wczytać kalendarza rezerwacji. ' + (err.message || '') + self._contactSuffix() +
+          esc('Nie udało się wczytać kalendarza rezerwacji. ' + (err.message || '') + self._contactSuffix()) +
             ' <button type="button" class="plb-link" data-action="retry">Spróbuj ponownie</button>',
           'error',
           true,
@@ -393,6 +395,7 @@
   };
 
   Widget.prototype.shiftMonth = function (delta) {
+    if (this.busy) return;
     var d = new Date(Date.UTC(this.view.y, this.view.m + delta, 1));
     this.view = { y: d.getUTCFullYear(), m: d.getUTCMonth() };
     this._loadMonth(false);
@@ -411,7 +414,8 @@
     this.loadingMonth = r.key;
     this.$('cal').setAttribute('aria-busy', 'true');
     this._renderTimes();
-    return this._request('/api/slots?from=' + r.from + '&to=' + r.to)
+    var own = this.hold ? this.hold.bookingId : this.prevBookingId;
+    return this._request('/api/slots?from=' + r.from + '&to=' + r.to + (own ? '&exclude=' + own : ''))
       .then(function (data) {
         data.days.forEach(function (d) {
           self.days[d.date] = d.slots;
@@ -545,7 +549,7 @@
   };
 
   Widget.prototype.selectDate = function (date) {
-    if (this.phase !== 'select') return;
+    if (this.phase !== 'select' || this.busy) return;
     this.date = date;
     this._alert('when', '');
     this._renderCalendar();
@@ -555,7 +559,7 @@
   };
 
   Widget.prototype.selectSlot = function (start) {
-    if (this.phase !== 'select') return;
+    if (this.phase !== 'select' || this.busy) return;
     var slot = (this.days[this.date] || []).filter(function (s) {
       return s.start === start;
     })[0];
@@ -819,6 +823,9 @@
     this._alert('verify', '');
     var payload = isResend ? this.lastPayload : this._collect();
     if (!payload) return;
+    // ID poprzedniej blokady = dowód, że to ten sam klient (zmiana danych/terminu bez nowego SMS-a).
+    payload.previousBookingId = (this.hold && this.hold.bookingId) || this.prevBookingId || undefined;
+    payload.resend = !!isResend;
     var btnRef = isResend ? 'resendBtn' : 'sendBtn';
     this._setBusy(btnRef, true, isResend ? 'Wysyłanie…' : 'Wysyłanie kodu…');
 
@@ -837,12 +844,18 @@
           offset: res.serverNow ? Date.parse(res.serverNow) - Date.now() : 0,
         };
         self.busy = false;
+        self.prevBookingId = null;
+        if (self.phase !== 'otp' && isResend) return; // klient w międzyczasie kliknął "Zmień dane"
         if (!isResend) {
           self.phase = 'otp';
           self._lock(true);
           self._renderVerify();
           self._startTimer();
           self.$('form').elements.code.focus();
+          if (res.smsSent === false) {
+            self._alert('verify', 'Zaktualizowaliśmy rezerwację. Wpisz kod z SMS-a, który już masz – jest nadal ważny.', 'info');
+            return;
+          }
         } else {
           self._tick();
           self._alert('verify', 'Wysłaliśmy nowy kod. Poprzedni kod jest już nieważny.', 'info');
@@ -936,6 +949,7 @@
     this._stopWebOtp();
     this.phase = 'select';
     this.hold = null;
+    this.prevBookingId = null;
     this.busy = false;
     this.slot = null;
     this._lock(false);
@@ -949,11 +963,14 @@
     this._loadMonth(true);
   };
 
+  /**
+   * Powrót do edycji. Blokada terminu zostaje: po poprawkach serwer przeniesie ją bez nowego SMS-a,
+   * jeśli kod z poprzedniego SMS-a jest jeszcze ważny. Termin klienta nie jest liczony jako zajęty (exclude).
+   */
   Widget.prototype.changeData = function () {
     var self = this;
-    if (this.hold) {
-      this._request('/api/release-hold', { bookingId: this.hold.bookingId }).catch(function () {});
-    }
+    if (this.busy) return;
+    this.prevBookingId = this.hold ? this.hold.bookingId : this.prevBookingId;
     var keep = this.slot;
     this._stopTimer();
     this._stopWebOtp();

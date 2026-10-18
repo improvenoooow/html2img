@@ -65,6 +65,7 @@ function testEnv(overrides = {}) {
     SMS_RESEND_COOLDOWN_SECONDS: '60',
     GCAL_CACHE_SECONDS: '0',
     ALLOWED_ORIGINS: 'https://pilankapilatestczew.pl',
+    TRUST_PROXY: '1', // testy symulują różne IP nagłówkiem X-Forwarded-For
     LOG_LEVEL: 'silent',
     ...overrides,
   };

@@ -248,14 +248,21 @@ test('globalny dzienny limit SMS chroni budżet', async () => {
   assert.equal(r.data.error.code, 'SMS_DAILY_LIMIT');
 });
 
-test('ten sam numer wybiera inny termin → poprzednia blokada jest zwalniana', async () => {
-  await ctx.api('/api/send-otp', { body: person() });
-  ctx.clock.advanceMinutes(1);
-  const second = await ctx.api('/api/send-otp', { body: person({ slotStart: SLOT_1000 }) });
-  assert.equal(second.status, 200);
+test('zmiana terminu z dowodem własności (previousBookingId) przenosi blokadę bez nowego SMS-a', async () => {
+  const first = await ctx.api('/api/send-otp', { body: person() });
+  const code = ctx.sms.lastCode();
+  const second = await ctx.api('/api/send-otp', {
+    body: person({ slotStart: SLOT_1000, previousBookingId: first.data.bookingId }),
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.data));
+  assert.equal(second.data.smsSent, false);
+  assert.equal(second.data.bookingId, first.data.bookingId);
+  assert.equal(ctx.sms.sent.length, 1, 'bez kolejnego SMS-a');
   const free = await slotsOn(ctx);
   assert.ok(free.includes(SLOT_0900), 'pierwszy termin zwolniony');
   assert.ok(!free.includes(SLOT_1000), 'nowy termin zablokowany');
+  const ok = await ctx.api('/api/verify-otp', { body: { bookingId: first.data.bookingId, code } });
+  assert.equal(ok.data.booking.start, SLOT_1000);
 });
 
 test('release-hold zwalnia termin od razu (także jako text/plain z sendBeacon)', async () => {
@@ -371,6 +378,8 @@ test('konserwacja: naprawia rezerwację zawieszoną w "confirming" i usuwa stare
   const row = (await ctx.pool.query('SELECT * FROM bookings WHERE id = $1', [id])).rows[0];
   await ctx.calendar.insertEvent(ctx.services.bookings.buildEvent(row));
   await ctx.pool.query(`UPDATE bookings SET status = 'confirming' WHERE id = $1`, [id]);
+  ctx.clock.advanceMinutes(3);
+  assert.equal((await ctx.services.bookings.runMaintenance()).reconciled, 0, 'weryfikacja może jeszcze trwać');
   ctx.clock.advanceMinutes(3);
   const m = await ctx.services.bookings.runMaintenance();
   assert.equal(m.reconciled, 1);

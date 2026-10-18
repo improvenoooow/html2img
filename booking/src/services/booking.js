@@ -8,13 +8,17 @@ const { Errors, AppError } = require('../lib/errors');
 const { normalizePlPhone, formatPlPhone, maskPhone } = require('../lib/phone');
 const { generateOtp, hashOtp, safeEqualHex, pseudonymize } = require('../lib/crypto');
 const { buildOtpMessage } = require('./sms');
+const { clientKey } = require('../lib/ip');
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const NAME_RE = /^\p{L}[\p{L}\p{M}' .-]*$/u;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const STUCK_CONFIRMING_MS = 2 * 60_000;
+// Dłużej niż najgorszy przypadek zapisu do Google (getEvent + freeBusy + insert, każdy z ponowieniami i timeoutem 10 s),
+// żeby zadanie okresowe nie "naprawiało" rezerwacji, którą weryfikacja wciąż potwierdza.
+const STUCK_CONFIRMING_MS = 5 * 60_000;
+const EVENT_SYNC_INTERVAL_MS = 5 * 60_000;
 
 function cleanName(value) {
   return typeof value === 'string' ? value.normalize('NFC').trim().replace(/\s+/g, ' ') : '';
@@ -42,6 +46,7 @@ class BookingService {
     this.logger = logger;
     this.alerts = alerts;
     this._lastBalanceCheck = 0;
+    this._lastEventSync = 0;
   }
 
   validateRequest(body) {
@@ -70,7 +75,7 @@ class BookingService {
 
   _hashes(phone, ip) {
     const secret = this.config.otp.secret;
-    return { phoneHash: pseudonymize(secret, 'phone', phone), ipHash: pseudonymize(secret, 'ip', ip || 'unknown') };
+    return { phoneHash: pseudonymize(secret, 'phone', phone), ipHash: pseudonymize(secret, 'ip', clientKey(ip)) };
   }
 
   /** Limity wysyłki SMS: odstęp między SMS-ami, limit na numer, na IP i dzienny limit globalny (budżet). */
@@ -109,8 +114,13 @@ class BookingService {
 
   /**
    * Krok 1 weryfikacji: blokuje termin (soft lock) i wysyła kod SMS.
-   * Ponowne wywołanie dla tego samego numeru i terminu = ponowna wysyłka kodu (ta sama rezerwacja).
-   * Wybranie innego terminu przez ten sam numer zwalnia poprzednią blokadę.
+   *
+   * `previousBookingId` – ID poprzedniej blokady z tej samej sesji widgetu (dowód, że to ta sama osoba):
+   *   - kod z poprzedniego SMS-a nadal ważny → zmiana terminu/danych bez wysyłania nowego SMS-a (`smsSent: false`),
+   *   - `resend: true` lub kod nieważny → nowy kod dla tej samej rezerwacji,
+   *   - inny numer telefonu → poprzednia blokada jest zwalniana.
+   * Bez dowodu własności nie zmieniamy cudzych danych ani nie zwalniamy cudzych blokad – najwyżej ponownie
+   * wysyłamy kod dla rezerwacji tego numeru i terminu (np. po odświeżeniu strony).
    */
   async requestOtp(body, { ip } = {}) {
     // Honeypot: ukryte pole, które wypełniają tylko boty. Udajemy sukces, nic nie wysyłając.
@@ -119,6 +129,7 @@ class BookingService {
       const now = this.clock.now();
       return {
         bookingId: crypto.randomUUID(),
+        smsSent: true,
         lockExpiresAt: new Date(now.getTime() + this.config.booking.holdMinutes * 60_000).toISOString(),
         otpExpiresAt: new Date(now.getTime() + this.config.otp.ttlSeconds * 1000).toISOString(),
         resendAvailableAt: new Date(now.getTime() + this.config.otp.resendCooldownSeconds * 1000).toISOString(),
@@ -127,51 +138,70 @@ class BookingService {
     }
 
     const input = this.validateRequest(body || {});
+    const previousId =
+      typeof body.previousBookingId === 'string' && UUID_RE.test(body.previousBookingId) ? body.previousBookingId : null;
+    const forceNewCode = body.resend === true;
     if (this.captcha.enabled && !(await this.captcha.verify(body.captchaToken, ip))) throw Errors.captchaFailed();
 
     const hashes = this._hashes(input.phone, ip);
-    // Szybkie sprawdzenie limitów przed zapytaniem do Google (bez blokady – autorytatywne jest w transakcji).
-    await this._checkSmsLimits(this.pool, hashes, this.clock.now().getTime());
-
     const slot = await this.availability.resolveBookableSlot(input.slotStart);
 
+    const { slotCapacity, holdMinutes } = this.config.booking;
+    const includeConfirmed = slotCapacity > 1;
     const code = generateOtp();
     const now = this.clock.now();
     const nowMs = now.getTime();
-    const lockExpiresAt = new Date(nowMs + this.config.booking.holdMinutes * 60_000);
+    const lockExpiresAt = new Date(nowMs + holdMinutes * 60_000);
     const otpExpiresAt = new Date(nowMs + this.config.otp.ttlSeconds * 1000);
+    const details = { slotStart: slot.start, slotEnd: slot.end, firstName: input.firstName, lastName: input.lastName, email: input.email };
 
     const hold = await withTransaction(this.pool, async (db) => {
       await repo.lockHoldSection(db);
+      const isSameSlot = (b) => b.slot_start.getTime() === slot.start.getTime();
+      const assertCapacity = async (excludeId) => {
+        const taken = await repo.countActiveOverlapping(db, slot.start, slot.end, now, { excludeId, includeConfirmed });
+        if (taken >= slotCapacity) throw Errors.slotUnavailable();
+      };
+
+      // Własna poprzednia blokada (klient zna jej ID).
+      let own = previousId ? await repo.getBooking(db, previousId, { forUpdate: true }) : null;
+      if (own && !(own.status === 'pending' && own.lock_expires_at > now)) own = null;
+      if (own && own.phone_hash !== hashes.phoneHash) {
+        await repo.cancelBooking(db, own.id, now); // klient zmienił numer telefonu
+        own = null;
+      }
+      if (own && !isSameSlot(own)) await assertCapacity(own.id);
+
+      const otpStillValid =
+        own && own.otp_hash && own.otp_expires_at > now && own.otp_attempts < this.config.otp.maxAttempts;
+      if (otpStillValid && !forceNewCode) {
+        await repo.updatePendingDetails(db, own.id, { ...details, now });
+        return { bookingId: own.id, smsSent: false, lockExpiresAt: own.lock_expires_at, otpExpiresAt: own.otp_expires_at };
+      }
+
       await this._checkSmsLimits(db, hashes, nowMs);
 
-      const pendings = await repo.findPendingByPhone(db, hashes.phoneHash, now);
-      const same = pendings.find((p) => p.slot_start.getTime() === slot.start.getTime());
-      for (const p of pendings) if (p !== same) await repo.cancelBooking(db, p.id, now);
-
+      let target = own;
+      if (!target) target = (await repo.findPendingByPhone(db, hashes.phoneHash, now)).find(isSameSlot) || null;
       let bookingId;
-      if (same) {
-        bookingId = same.id;
-        await repo.refreshPendingBooking(db, bookingId, {
-          ...input,
+      if (target) {
+        bookingId = target.id;
+        const ok = await repo.refreshPendingBooking(db, bookingId, {
           otpHash: hashOtp(this.config.otp.secret, bookingId, code),
           otpExpiresAt,
           lockExpiresAt,
           now,
+          ...(own ? details : {}),
         });
+        if (!ok) throw Errors.holdExpired();
       } else {
-        const taken = await repo.countActiveOverlapping(db, slot.start, slot.end, now);
-        if (taken >= this.config.booking.slotCapacity) throw Errors.slotUnavailable();
+        await assertCapacity(null);
         bookingId = crypto.randomUUID();
         await repo.insertBooking(db, {
           id: bookingId,
-          slotStart: slot.start,
-          slotEnd: slot.end,
-          firstName: input.firstName,
-          lastName: input.lastName,
+          ...details,
           phone: input.phone,
           phoneHash: hashes.phoneHash,
-          email: input.email,
           lockExpiresAt,
           otpHash: hashOtp(this.config.otp.secret, bookingId, code),
           otpExpiresAt,
@@ -179,24 +209,46 @@ class BookingService {
         });
       }
       const smsLogId = await repo.insertSmsLog(db, { ...hashes, bookingId, now });
-      return { bookingId, created: !same, smsLogId };
+      return { bookingId, smsSent: true, snapshot: target, smsLogId, lockExpiresAt, otpExpiresAt };
     });
 
+    if (hold.smsSent) await this._sendOtpSms(input.phone, code, hold);
+
+    return {
+      bookingId: hold.bookingId,
+      smsSent: hold.smsSent,
+      slot: { start: slot.start.toISOString(), end: slot.end.toISOString() },
+      phone: formatPlPhone(input.phone),
+      lockExpiresAt: hold.lockExpiresAt.toISOString(),
+      otpExpiresAt: hold.otpExpiresAt.toISOString(),
+      resendAvailableAt: new Date(
+        (hold.smsSent ? nowMs : Math.max(nowMs, hold.otpExpiresAt.getTime() - this.config.otp.ttlSeconds * 1000)) +
+          this.config.otp.resendCooldownSeconds * 1000,
+      ).toISOString(),
+      serverNow: this.clock.now().toISOString(),
+    };
+  }
+
+  async _sendOtpSms(phone, code, hold) {
     const message = buildOtpMessage(this.config.sms, {
       code,
       minutes: Math.round(this.config.otp.ttlSeconds / 60),
       businessName: this.config.businessName,
     });
     try {
-      const sent = await this.sms.send(input.phone, message);
-      this.logger.info('otp_sent', { bookingId: hold.bookingId, to: maskPhone(input.phone), provider: this.sms.name, smsId: sent?.id });
+      const sent = await this.sms.send(phone, message);
+      this.logger.info('otp_sent', { bookingId: hold.bookingId, to: maskPhone(phone), provider: this.sms.name, smsId: sent?.id });
     } catch (err) {
+      // Bramka odpowiedziała błędem → SMS na pewno nie wyszedł. Brak odpowiedzi (timeout, sieć) → mógł wyjść,
+      // więc wpis zostaje w dzienniku i liczy się do limitów.
+      const definitive = err.code !== null && err.code !== undefined;
       this.logger.error(err.configProblem ? 'sms_provider_config_error' : 'sms_send_failed', {
         err,
         bookingId: hold.bookingId,
-        to: maskPhone(input.phone),
+        to: maskPhone(phone),
         provider: this.sms.name,
         code: err.code,
+        definitive,
       });
       if (err.configProblem) {
         this.alerts.notify(
@@ -205,23 +257,15 @@ class BookingService {
             'sprawdź saldo, token i nazwę nadawcy.',
         );
       }
-      // Nieudana wysyłka nie zużywa limitu klienta; nowa rezerwacja zwalnia termin.
+      // Stan sprzed żądania: nowa rezerwacja zwalnia termin, istniejąca wraca do poprzedniego kodu, prób i blokady
+      // (inaczej nieudane wysyłki pozwalałyby bez końca zerować licznik prób i przedłużać blokadę).
       await withTransaction(this.pool, async (db) => {
-        await repo.deleteSmsLog(db, hold.smsLogId);
-        if (hold.created) await repo.cancelBooking(db, hold.bookingId, this.clock.now());
+        if (definitive) await repo.deleteSmsLog(db, hold.smsLogId);
+        if (hold.snapshot) await repo.restorePendingBooking(db, hold.snapshot, this.clock.now());
+        else await repo.cancelBooking(db, hold.bookingId, this.clock.now());
       }).catch((e) => this.logger.error('sms_failure_cleanup_failed', { err: e }));
       throw Errors.smsFailed();
     }
-
-    return {
-      bookingId: hold.bookingId,
-      slot: { start: slot.start.toISOString(), end: slot.end.toISOString() },
-      phone: formatPlPhone(input.phone),
-      lockExpiresAt: lockExpiresAt.toISOString(),
-      otpExpiresAt: otpExpiresAt.toISOString(),
-      resendAvailableAt: new Date(nowMs + this.config.otp.resendCooldownSeconds * 1000).toISOString(),
-      serverNow: this.clock.now().toISOString(),
-    };
   }
 
   /**
@@ -258,7 +302,9 @@ class BookingService {
       throw Errors.otpInvalid(outcome.attemptsLeft);
     }
     const b = outcome.booking;
-    if (outcome.already) return this._confirmationResult(b);
+    // Ponowne wywołanie dla potwierdzonej rezerwacji (np. podwójne kliknięcie) – bez danych osobowych,
+    // bo tej ścieżki nie chroni kod (ID rezerwacji nie jest tajne).
+    if (outcome.already) return this._confirmationResult(b, { personal: false });
 
     let event;
     try {
@@ -266,7 +312,7 @@ class BookingService {
     } catch (err) {
       if (err instanceof AppError && err.code === 'SLOT_UNAVAILABLE') {
         // Termin zajęto bezpośrednio w kalendarzu w trakcie weryfikacji.
-        await repo.markStatus(this.pool, b.id, 'cancelled', this.clock.now());
+        await repo.markStatus(this.pool, b.id, 'cancelled', this.clock.now(), { from: 'confirming' });
         this.logger.warn('slot_taken_in_calendar_during_verification', { bookingId: b.id });
         throw err;
       }
@@ -318,19 +364,14 @@ class BookingService {
     };
   }
 
-  _confirmationResult(b) {
-    return {
-      status: 'confirmed',
-      message: 'Zarezerwowano',
-      booking: {
-        id: b.id,
-        start: b.slot_start.toISOString(),
-        end: b.slot_end.toISOString(),
-        firstName: b.first_name,
-        lastName: b.last_name,
-        phone: b.phone ? formatPlPhone(b.phone) : null,
-      },
-    };
+  _confirmationResult(b, { personal = true } = {}) {
+    const booking = { id: b.id, start: b.slot_start.toISOString(), end: b.slot_end.toISOString() };
+    if (personal) {
+      booking.firstName = b.first_name;
+      booking.lastName = b.last_name;
+      booking.phone = b.phone ? formatPlPhone(b.phone) : null;
+    }
+    return { status: 'confirmed', message: 'Zarezerwowano', booking };
   }
 
   /** Klient zrezygnował / zmienia dane – zwalnia soft lock od razu, bez czekania na wygaśnięcie. */
@@ -367,6 +408,35 @@ class BookingService {
     }
   }
 
+  /**
+   * Co 5 min: rezerwacje, których wydarzenie studio usunęło z Google Calendar, oznaczamy jako anulowane.
+   * Przy zajęciach grupowych (wydarzenia "Dostępne") to jedyny sposób, by usunięcie zwolniło miejsce.
+   */
+  async _syncDeletedEvents(db, now) {
+    if (now.getTime() - this._lastEventSync < EVENT_SYNC_INTERVAL_MS) return 0;
+    this._lastEventSync = now.getTime();
+    const upcoming = await repo.listUpcomingConfirmed(db, now);
+    if (!upcoming.length || typeof this.calendar.listBookingEvents !== 'function') return 0;
+    let events;
+    try {
+      const until = new Date(Math.max(...upcoming.map((b) => b.slot_end.getTime())) + DAY);
+      events = await this.calendar.listBookingEvents(now, until);
+    } catch (err) {
+      this.logger.warn('gcal_event_sync_failed', { err });
+      return 0;
+    }
+    const live = new Set(events.filter((e) => e.status !== 'cancelled').map((e) => e.id));
+    let cancelled = 0;
+    for (const b of upcoming) {
+      if (!live.has(b.gcal_event_id) && (await repo.markStatus(db, b.id, 'cancelled', now, { from: 'confirmed' }))) {
+        cancelled++;
+        this.logger.info('booking_cancelled_in_calendar', { bookingId: b.id });
+      }
+    }
+    if (cancelled) this.availability.invalidateCache();
+    return cancelled;
+  }
+
   async runMaintenance() {
     const client = await this.pool.connect();
     try {
@@ -379,21 +449,24 @@ class BookingService {
           try {
             const event = await this.calendar.getEvent(eventIdFor(b.id));
             if (event && event.status !== 'cancelled') await repo.markConfirmed(client, b.id, event.id, now);
-            else if (b.lock_expires_at <= now) await repo.markStatus(client, b.id, 'expired', now);
+            else if (b.lock_expires_at <= now) await repo.markStatus(client, b.id, 'expired', now, { from: 'confirming' });
             else await repo.revertToPending(client, b.id, now);
             reconciled++;
           } catch (err) {
             this.logger.warn('reconcile_confirming_failed', { err, bookingId: b.id });
           }
         }
+        const cancelledInCalendar = await this._syncDeletedEvents(client, now);
         const purged = await repo.purgeOldData(client, {
           inactiveBefore: new Date(now - DAY),
           confirmedSlotEndBefore: new Date(now - this.config.booking.retentionDays * DAY),
           smsLogBefore: new Date(now - 2 * DAY),
         });
         await this._checkSmsBalance();
-        const summary = { expired, reconciled, ...purged };
-        if (expired || reconciled || purged.inactive || purged.confirmed) this.logger.info('maintenance', summary);
+        const summary = { expired, reconciled, cancelledInCalendar, ...purged };
+        if (expired || reconciled || cancelledInCalendar || purged.inactive || purged.confirmed) {
+          this.logger.info('maintenance', summary);
+        }
         return summary;
       } finally {
         await repo.releaseMaintenanceLock(client);

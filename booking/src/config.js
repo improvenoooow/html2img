@@ -204,8 +204,22 @@ function loadConfig(env = process.env, opts = {}) {
   }
   if (isProd && allowedOrigins.includes('*')) warnings.push('ALLOWED_ORIGINS="*" w produkcji – zalecane jest podanie konkretnych domen');
 
-  const trustProxyRaw = str('TRUST_PROXY', '1');
-  const trustProxy = /^\d+$/.test(trustProxyRaw) ? Number(trustProxyRaw) : trustProxyRaw === 'true' ? true : trustProxyRaw;
+  // Domyślnie NIE ufamy X-Forwarded-For – bez proxy przed aplikacją klient mógłby podać dowolne IP
+  // i obejść limity SMS na IP. Za nginx/Caddy/Railway ustaw TRUST_PROXY=1 (liczba proxy).
+  const trustProxyRaw = str('TRUST_PROXY', 'false').toLowerCase();
+  const trustProxy = /^\d+$/.test(trustProxyRaw)
+    ? Number(trustProxyRaw)
+    : trustProxyRaw === 'true'
+      ? true
+      : trustProxyRaw === 'false'
+        ? false
+        : trustProxyRaw;
+  if (isProd && !opts.only && !trustProxy) {
+    warnings.push(
+      'TRUST_PROXY nie jest ustawiony – jeśli aplikacja stoi za nginx/Caddy/Railway, ustaw TRUST_PROXY=1, ' +
+        'inaczej wszyscy klienci będą mieli wspólny limit SMS na IP',
+    );
+  }
 
   const turnstile = {
     siteKey: str('TURNSTILE_SITE_KEY') || null,
@@ -213,6 +227,11 @@ function loadConfig(env = process.env, opts = {}) {
   };
   if (Boolean(turnstile.siteKey) !== Boolean(turnstile.secretKey)) {
     problems.push('TURNSTILE_SITE_KEY i TURNSTILE_SECRET_KEY muszą być ustawione razem');
+  }
+  if (isProd && !opts.only && !turnstile.secretKey) {
+    warnings.push(
+      'Cloudflare Turnstile nie jest skonfigurowany – zalecany w produkcji, utrudnia botom wysyłkę SMS-ów na koszt studia',
+    );
   }
 
   const alerts = {

@@ -70,6 +70,15 @@ class MockCalendar {
     this.events.delete(id);
   }
 
+  async listBookingEvents(timeMin, timeMax) {
+    return [...this.events.values()].filter(
+      (e) =>
+        e.extendedProperties?.private?.source === 'pilanka-booking' &&
+        new Date(e.end.dateTime) > timeMin &&
+        new Date(e.start.dateTime) < timeMax,
+    );
+  }
+
   async getCalendarMeta() {
     return { id: this.calendarId, summary: 'Kalendarz testowy (mock)', timeZone: 'Europe/Warsaw' };
   }

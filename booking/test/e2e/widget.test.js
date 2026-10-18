@@ -142,15 +142,24 @@ test('widget (mobile): termin zajęty przez kogoś innego w trakcie wypełniania
     assert.equal(await w.locator('#plb-phone').getAttribute('readonly'), null);
     await shot(page, '07-mobile-termin-zajety');
 
-    // Zmiana danych w trakcie weryfikacji zwalnia blokadę.
+    // "Zmień dane": poprawka nazwiska bez nowego SMS-a; własny termin nie jest pokazywany jako zajęty.
     await w.locator('.plb-slot', { hasText: '09:00' }).click();
     await w.getByRole('button', { name: 'Wyślij kod SMS' }).click();
     await w.locator('#plb-code').waitFor();
     await shot(page, '08-mobile-kod');
+    const code = ctx.sms.lastCode();
     await w.getByRole('button', { name: 'Zmień dane lub termin' }).click();
     await w.getByRole('button', { name: 'Wyślij kod SMS' }).waitFor();
-    const slots = await ctx.api('/api/slots?from=2026-10-19&to=2026-10-19');
-    assert.ok(slots.data.days[0].slots.some((s) => s.start === '2026-10-19T07:00:00.000Z'), '09:00 znów wolne');
+    await w.locator('.plb-slot[aria-pressed="true"]', { hasText: '09:00' }).waitFor();
+    assert.equal(await w.locator('[data-ref="whenAlert"]').textContent(), '', 'brak fałszywego "termin zajęty"');
+    await w.locator('#plb-lastName').fill('Wiśniewski-Nowak');
+    await w.getByRole('button', { name: 'Wyślij kod SMS' }).click();
+    await w.locator('[data-ref="verifyAlert"]').filter({ hasText: 'jest nadal ważny' }).waitFor();
+    assert.equal(ctx.sms.sent.length, 2, 'bez nowego SMS-a (1 dla Ewy z API + 1 dla Jana)');
+    await w.locator('#plb-code').fill(code);
+    await w.getByRole('heading', { name: 'Zarezerwowano!' }).waitFor();
+    const ev = [...ctx.calendar.events.values()].find((e) => e.summary.includes('Jan'));
+    assert.equal(ev.summary, 'Rezerwacja: Jan Wiśniewski-Nowak - +48 512 345 678');
   } finally {
     await browser.close();
     await ctx.close();

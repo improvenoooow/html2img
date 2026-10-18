@@ -193,6 +193,7 @@ Zginęłyby tylko trwające w danej chwili blokady i dziennik limitów SMS.
 3. **Variables** (pełna lista z opisami w [`.env.example`](.env.example)), minimum:
    ```
    NODE_ENV=production
+   TRUST_PROXY=1
    DATABASE_URL=${{Postgres.DATABASE_URL}}
    OTP_SECRET=<openssl rand -hex 32>
    ALLOWED_ORIGINS=https://pilankapilatestczew.pl,https://www.pilankapilatestczew.pl
@@ -291,7 +292,8 @@ WORKING_HOURS=mon-fri=06:30-09:30,16:00-21:00;sat=08:00-13:00
 - **Blokowanie czasu** (urlop, prywatne sprawy, zajęcia grupowe): dodaj wydarzenie w Google Calendar.
   Musi mieć ustawienie **„Zajęty”**. Uwaga: wydarzenia całodniowe Google domyślnie oznacza jako **„Dostępny”**,
   więc przy blokowaniu całych dni zmień to na „Zajęty”.
-- **Odwołanie rezerwacji:** usuń wydarzenie z kalendarza. Termin od razu znów będzie dostępny.
+- **Odwołanie rezerwacji:** usuń wydarzenie z kalendarza. Przy zajęciach indywidualnych termin od razu znów
+  będzie dostępny, przy grupowych miejsce zwolni się w ciągu 5 minut.
 - **Święta / zamknięcie:** wydarzenie „Zajęty” w kalendarzu albo zmienna `CLOSED_DATES`.
 - **Zmiana godzin pracy / długości zajęć:** zmienne `WORKING_HOURS`, `SLOT_DURATION_MIN`, `BUFFER_MIN`.
 - **Zajęcia grupowe:** `SLOT_CAPACITY=6` (liczba miejsc). Wydarzenia rezerwacji są wtedy „Dostępne”,

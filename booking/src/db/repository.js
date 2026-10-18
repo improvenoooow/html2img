@@ -6,10 +6,12 @@
  * dzięki czemu logika wygasania blokad jest deterministyczna i testowalna.
  */
 
-// Rezerwacja blokuje termin, gdy jest potwierdzona, w trakcie potwierdzania
-// lub oczekuje na kod SMS i jej soft lock jeszcze nie wygasł.
-const ACTIVE = (nowParam) =>
-  `(status IN ('confirmed', 'confirming') OR (status = 'pending' AND lock_expires_at > ${nowParam}))`;
+// Rezerwacja blokuje termin, gdy jest w trakcie potwierdzania lub oczekuje na kod SMS (ważny soft lock).
+// Potwierdzone liczymy tylko na żądanie: przy zajęciach indywidualnych źródłem prawdy jest Google Calendar
+// (nieprzezroczyste wydarzenie blokuje Free/Busy), więc usunięcie wydarzenia od razu zwalnia termin.
+const ACTIVE = (nowParam, includeConfirmed) =>
+  `(status = 'confirming' ${includeConfirmed ? "OR status = 'confirmed'" : ''} ` +
+  `OR (status = 'pending' AND lock_expires_at > ${nowParam}))`;
 
 const GLOBAL_HOLD_LOCK_KEY = 728_431_002;
 const MAINTENANCE_LOCK_KEY = 728_431_003;
@@ -19,19 +21,20 @@ async function lockHoldSection(db) {
   await db.query('SELECT pg_advisory_xact_lock($1)', [GLOBAL_HOLD_LOCK_KEY]);
 }
 
-async function listActiveInRange(db, from, to, now) {
+async function listActiveInRange(db, from, to, now, { includeConfirmed = true, excludeId = null } = {}) {
   const { rows } = await db.query(
     `SELECT slot_start, slot_end FROM bookings
-     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3')}`,
-    [from, to, now],
+     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3', includeConfirmed)}
+       AND ($4::uuid IS NULL OR id <> $4::uuid)`,
+    [from, to, now, excludeId],
   );
   return rows;
 }
 
-async function countActiveOverlapping(db, start, end, now, { excludeId = null } = {}) {
+async function countActiveOverlapping(db, start, end, now, { excludeId = null, includeConfirmed = true } = {}) {
   const { rows } = await db.query(
     `SELECT count(*)::int AS n FROM bookings
-     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3')}
+     WHERE slot_start < $2 AND slot_end > $1 AND ${ACTIVE('$3', includeConfirmed)}
        AND ($4::uuid IS NULL OR id <> $4::uuid)`,
     [start, end, now, excludeId],
   );
@@ -60,13 +63,48 @@ async function insertBooking(db, b) {
   );
 }
 
-/** Ponowna wysyłka kodu dla tej samej rezerwacji: nowy kod, reset prób, odświeżenie danych i blokady. */
+/**
+ * Nowy kod dla oczekującej rezerwacji: nowy hash, reset prób, przedłużenie blokady.
+ * Termin i dane klienta zmieniane tylko, gdy zostaną podane (czyli gdy klient udowodnił, że to jego rezerwacja).
+ */
 async function refreshPendingBooking(db, id, b) {
+  const { rowCount } = await db.query(
+    `UPDATE bookings SET otp_hash = $2, otp_expires_at = $3, otp_attempts = 0, lock_expires_at = $4, updated_at = $5,
+            slot_start = COALESCE($6, slot_start), slot_end = COALESCE($7, slot_end),
+            first_name = COALESCE($8, first_name), last_name = COALESCE($9, last_name),
+            email = CASE WHEN $10::boolean THEN $11 ELSE email END,
+            consent_at = CASE WHEN $10::boolean THEN $5 ELSE consent_at END
+     WHERE id = $1 AND status = 'pending'`,
+    [
+      id, b.otpHash, b.otpExpiresAt, b.lockExpiresAt, b.now,
+      b.slotStart ?? null, b.slotEnd ?? null, b.firstName ?? null, b.lastName ?? null,
+      b.firstName !== undefined, b.email ?? null,
+    ],
+  );
+  return rowCount > 0;
+}
+
+/** Zmiana terminu lub danych oczekującej rezerwacji bez wysyłania nowego kodu (kod z SMS-a nadal ważny). */
+async function updatePendingDetails(db, id, b) {
+  const { rowCount } = await db.query(
+    `UPDATE bookings SET slot_start = $2, slot_end = $3, first_name = $4, last_name = $5, email = $6,
+            consent_at = $7, updated_at = $7
+     WHERE id = $1 AND status = 'pending'`,
+    [id, b.slotStart, b.slotEnd, b.firstName, b.lastName, b.email, b.now],
+  );
+  return rowCount > 0;
+}
+
+/** Przywraca stan rezerwacji sprzed nieudanej ponownej wysyłki SMS (kod, próby, blokada, termin, dane). */
+async function restorePendingBooking(db, snapshot, now) {
   await db.query(
-    `UPDATE bookings SET first_name = $2, last_name = $3, email = $4, otp_hash = $5, otp_expires_at = $6,
-            otp_attempts = 0, lock_expires_at = $7, consent_at = $8, updated_at = $8
-     WHERE id = $1`,
-    [id, b.firstName, b.lastName, b.email, b.otpHash, b.otpExpiresAt, b.lockExpiresAt, b.now],
+    `UPDATE bookings SET otp_hash = $2, otp_expires_at = $3, otp_attempts = $4, lock_expires_at = $5,
+            slot_start = $6, slot_end = $7, first_name = $8, last_name = $9, email = $10, updated_at = $11
+     WHERE id = $1 AND status = 'pending'`,
+    [
+      snapshot.id, snapshot.otp_hash, snapshot.otp_expires_at, snapshot.otp_attempts, snapshot.lock_expires_at,
+      snapshot.slot_start, snapshot.slot_end, snapshot.first_name, snapshot.last_name, snapshot.email, now,
+    ],
   );
 }
 
@@ -104,16 +142,32 @@ async function revertToPending(db, id, now) {
 }
 
 async function markConfirmed(db, id, eventId, now) {
-  await db.query(
+  const { rowCount } = await db.query(
     `UPDATE bookings SET status = 'confirmed', gcal_event_id = $2, confirmed_at = $3, updated_at = $3,
             otp_hash = NULL, otp_expires_at = NULL
-     WHERE id = $1`,
+     WHERE id = $1 AND status = 'confirming'`,
     [id, eventId, now],
   );
+  return rowCount > 0;
 }
 
-async function markStatus(db, id, status, now) {
-  await db.query(`UPDATE bookings SET status = $2, otp_hash = NULL, updated_at = $3 WHERE id = $1`, [id, status, now]);
+/** Zmiana statusu tylko z oczekiwanego stanu (ochrona przed wyścigiem weryfikacji i zadania okresowego). */
+async function markStatus(db, id, status, now, { from }) {
+  const { rowCount } = await db.query(
+    `UPDATE bookings SET status = $2, otp_hash = NULL, updated_at = $3 WHERE id = $1 AND status = $4`,
+    [id, status, now, from],
+  );
+  return rowCount > 0;
+}
+
+/** Przyszłe potwierdzone rezerwacje z wydarzeniem w GCal (do uzgadniania usuniętych wydarzeń). */
+async function listUpcomingConfirmed(db, now) {
+  const { rows } = await db.query(
+    `SELECT id, gcal_event_id, slot_start, slot_end FROM bookings
+     WHERE status = 'confirmed' AND slot_end > $1 AND gcal_event_id IS NOT NULL`,
+    [now],
+  );
+  return rows;
 }
 
 // --- sms_log ---
@@ -190,6 +244,9 @@ module.exports = {
   findPendingByPhone,
   insertBooking,
   refreshPendingBooking,
+  updatePendingDetails,
+  restorePendingBooking,
+  listUpcomingConfirmed,
   cancelBooking,
   getBooking,
   incrementOtpAttempts,

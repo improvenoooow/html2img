@@ -187,6 +187,28 @@ class GoogleCalendarClient {
     );
   }
 
+  /** Wydarzenia utworzone przez system rezerwacji (także usunięte – status "cancelled"). */
+  async listBookingEvents(timeMin, timeMax) {
+    const items = [];
+    let pageToken;
+    do {
+      const data = await this._request('GET', `/calendars/${encodeURIComponent(this.calendarId)}/events`, {
+        query: {
+          privateExtendedProperty: 'source=pilanka-booking',
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
+          showDeleted: 'true',
+          singleEvents: 'true',
+          maxResults: '2500',
+          ...(pageToken ? { pageToken } : {}),
+        },
+      });
+      items.push(...(data?.items || []));
+      pageToken = data?.nextPageToken;
+    } while (pageToken);
+    return items;
+  }
+
   async getCalendarMeta() {
     return this._request('GET', `/calendars/${encodeURIComponent(this.calendarId)}`);
   }
